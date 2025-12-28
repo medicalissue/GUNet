@@ -54,8 +54,10 @@ def parse_gaussian_params(raw_params: torch.Tensor) -> Dict[str, torch.Tensor]:
     scale = torch.exp(params[..., 2:4])  # positive, log-space output
     rotation = params[..., 4:5]  # radians, unbounded
 
-    # Color: sigmoid for smooth [0,1] mapping
-    color = torch.sigmoid(params[..., 5:8])
+    # Color: STE (Straight-Through Estimator)
+    # Forward: clamp to [0,1], Backward: gradient passes through unchanged
+    color_raw = params[..., 5:8]
+    color = color_raw + (color_raw.clamp(0, 1) - color_raw).detach()
 
     # Opacity: sigmoid for smooth [0,1] mapping
     opacity = torch.sigmoid(params[..., 8:9])

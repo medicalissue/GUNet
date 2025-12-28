@@ -21,7 +21,7 @@ l1_weight: 0.8
 ssim_weight: 0.2
 lpips_weight: 0.1        # Weight for LPIPS perceptual loss (0 to disable)
 count_weight: 0.00001     # Weight for Gaussian count loss (0 to disable)
-target_count: null       # Target number of effective Gaussians (null to penalize all)
+target_count: 5096       # Target number of effective Gaussians (null to penalize all)
 scale_weight: 0.0       # Weight for scale loss - penalizes small scales (0 to disable)
 
 # Checkpointing
