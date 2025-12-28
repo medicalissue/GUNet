@@ -6,7 +6,7 @@ image_size: 256
 
 # Model
 base_channels: 64
-num_levels: 8        # Total encoder/decoder levels
+num_levels: 4        # Total encoder/decoder levels
 start_level: 0       # Start Gaussian output from this level (0=full res, 1=half, 2=quarter...)
                      # start_level=1 means: 128x128, 64x64, 32x32, 16x16 (skip 256x256)
 
@@ -20,8 +20,8 @@ num_workers: 4
 l1_weight: 0.8
 ssim_weight: 0.2
 lpips_weight: 0.1        # Weight for LPIPS perceptual loss (0 to disable)
-count_weight: 0.1     # Weight for Gaussian count loss (0 to disable)
-target_count: 2048       # Target number of effective Gaussians (null to penalize all)
+count_weight: 0.00001     # Weight for Gaussian count loss (0 to disable)
+target_count: null       # Target number of effective Gaussians (null to penalize all)
 scale_weight: 0.0       # Weight for scale loss - penalizes small scales (0 to disable)
 
 # Checkpointing
