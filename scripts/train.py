@@ -45,6 +45,8 @@ def parse_args():
                         help='Base number of channels')
     parser.add_argument('--num_levels', type=int, default=5,
                         help='Number of pyramid levels')
+    parser.add_argument('--start_level', type=int, default=0,
+                        help='First level to output Gaussians (0=full res, 1=half, etc.)')
 
     # Training
     parser.add_argument('--batch_size', type=int, default=8,
@@ -108,6 +110,7 @@ def parse_args():
     print(f"image_size: {args.image_size}")
     print(f"batch_size: {args.batch_size}")
     print(f"num_levels: {args.num_levels}")
+    print(f"start_level: {args.start_level}")
     print(f"vis_every: {args.vis_every}")
     print(f"==============")
 
@@ -496,14 +499,16 @@ def main():
         in_channels=3,
         base_channels=args.base_channels,
         num_levels=args.num_levels,
+        start_level=args.start_level,
     ).to(device)
 
     # Print model info
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f'Model parameters: {num_params:,}')
 
-    num_gaussians = model.get_num_gaussians(args.image_size, args.image_size)
-    print(f'Gaussians per image: {num_gaussians:,}')
+    print(f'\n=== Gaussian Distribution ===')
+    print(model.get_gaussian_info(args.image_size, args.image_size))
+    print(f'==============================\n')
 
     # Loss
     criterion = ReconstructionLoss(

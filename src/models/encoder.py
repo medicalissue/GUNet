@@ -2,7 +2,7 @@
 Multi-Scale Gaussian UNet.
 
 Architecture:
-- Encoder: 4 levels + bottleneck
+- Encoder: Multiple levels with downsampling
 - Decoder: Each level outputs 9-channel Gaussian parameters
 - Skip connections from encoder to decoder
 
@@ -92,7 +92,16 @@ class MultiScaleGaussianUNet(nn.Module):
     Args:
         in_channels: Number of input channels (default: 3 for RGB)
         base_channels: Base number of channels (doubled at each level)
-        num_levels: Number of pyramid levels (default: 5, including bottleneck)
+        num_levels: Number of pyramid levels for encoder/decoder
+        start_level: First level to output Gaussians (0=full res, 1=half, etc.)
+                     Levels < start_level will not output Gaussians.
+
+    Example with num_levels=4, start_level=1, image_size=256:
+        - Level 0 (256x256): NO Gaussians (skipped)
+        - Level 1 (128x128): 16,384 Gaussians
+        - Level 2 (64x64): 4,096 Gaussians
+        - Level 3 (32x32): 1,024 Gaussians
+        Total: 21,504 Gaussians
     """
 
     def __init__(
@@ -100,9 +109,11 @@ class MultiScaleGaussianUNet(nn.Module):
         in_channels: int = 3,
         base_channels: int = 64,
         num_levels: int = 5,
+        start_level: int = 0,
     ):
         super().__init__()
         self.num_levels = num_levels
+        self.start_level = start_level
 
         # Channel progression: 64 -> 128 -> 256 -> 512 -> 512
         channels = [base_channels * min(2**i, 8) for i in range(num_levels)]
@@ -120,12 +131,11 @@ class MultiScaleGaussianUNet(nn.Module):
             for i in range(num_levels - 2, -1, -1)
         ])
 
-        # Gaussian output heads for each level
-        # Level 0: full resolution, Level L-1: bottleneck
-        self.gaussian_heads = nn.ModuleList([
-            GaussianHead(channels[i])
-            for i in range(num_levels)
-        ])
+        # Gaussian output heads only for levels >= start_level
+        self.gaussian_heads = nn.ModuleDict()
+        for i in range(num_levels):
+            if i >= start_level:
+                self.gaussian_heads[str(i)] = GaussianHead(channels[i])
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
@@ -157,9 +167,11 @@ class MultiScaleGaussianUNet(nn.Module):
         multi_scale_raw = []
         dec_features = [enc_features[-1]]  # Start from bottleneck
 
-        # Bottleneck Gaussian output
-        raw_params = self.gaussian_heads[-1](enc_features[-1])
-        multi_scale_raw.append((raw_params, self.num_levels - 1))
+        # Bottleneck Gaussian output (if >= start_level)
+        bottleneck_level = self.num_levels - 1
+        if bottleneck_level >= self.start_level:
+            raw_params = self.gaussian_heads[str(bottleneck_level)](enc_features[-1])
+            multi_scale_raw.append((raw_params, bottleneck_level))
 
         # Decode and produce Gaussians at each level
         for i, decoder in enumerate(self.decoders):
@@ -168,9 +180,10 @@ class MultiScaleGaussianUNet(nn.Module):
             f = decoder(dec_features[-1], skip)
             dec_features.append(f)
 
-            # Gaussian output for this level
-            raw_params = self.gaussian_heads[level_idx](f)
-            multi_scale_raw.append((raw_params, level_idx))
+            # Gaussian output for this level (if >= start_level)
+            if level_idx >= self.start_level:
+                raw_params = self.gaussian_heads[str(level_idx)](f)
+                multi_scale_raw.append((raw_params, level_idx))
 
         # Parse and upsample Gaussians from all levels
         multi_scale_gaussians = []
@@ -190,8 +203,24 @@ class MultiScaleGaussianUNet(nn.Module):
     def get_num_gaussians(self, H: int, W: int) -> int:
         """Calculate total number of Gaussians for given image size."""
         total = 0
-        for l in range(self.num_levels):
+        for l in range(self.start_level, self.num_levels):
             h = H // (2 ** l)
             w = W // (2 ** l)
             total += h * w
         return total
+
+    def get_gaussian_info(self, H: int, W: int) -> str:
+        """Get detailed info about Gaussian distribution."""
+        lines = []
+        total = 0
+        for l in range(self.num_levels):
+            h = H // (2 ** l)
+            w = W // (2 ** l)
+            count = h * w
+            if l >= self.start_level:
+                lines.append(f"  Level {l}: {h}x{w} = {count:,} Gaussians")
+                total += count
+            else:
+                lines.append(f"  Level {l}: {h}x{w} = SKIPPED")
+        lines.append(f"  Total: {total:,} Gaussians")
+        return "\n".join(lines)

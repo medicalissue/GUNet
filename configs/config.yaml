@@ -6,7 +6,9 @@ image_size: 256
 
 # Model
 base_channels: 64
-num_levels: 3  # 3 levels: 256, 128, 64 (faster, ~21K Gaussians)
+num_levels: 5        # Total encoder/decoder levels
+start_level: 1       # Start Gaussian output from this level (0=full res, 1=half, 2=quarter...)
+                     # start_level=1 means: 128x128, 64x64, 32x32, 16x16 (skip 256x256)
 
 # Training
 batch_size: 1
@@ -24,7 +26,7 @@ save_every: 10
 
 # Visualization
 vis_dir: ./visualizations
-vis_every: 100  # Visualize every N batches
+vis_every: 10000  # Visualize every N batches
 
 # Device
 device: cuda
