@@ -55,7 +55,8 @@ def parse_gaussian_params(raw_params: torch.Tensor) -> Dict[str, torch.Tensor]:
     rotation = params[..., 4:5]  # radians, unbounded
     # Color: direct output with clamp for full dynamic range
     color = params[..., 5:8].clamp(0, 1)  # [0, 1]
-    opacity = torch.sigmoid(params[..., 8:9])  # [0, 1]
+    # Opacity: direct output with clamp (allows exact 0/1 for sparsity)
+    opacity = params[..., 8:9].clamp(0, 1)  # [0, 1]
 
     return {
         'delta_mu': delta_mu,
