@@ -53,10 +53,16 @@ def parse_gaussian_params(raw_params: torch.Tensor) -> Dict[str, torch.Tensor]:
     delta_mu = torch.tanh(params[..., 0:2]) * 0.5  # [-0.5, 0.5]
     scale = torch.exp(params[..., 2:4])  # positive, log-space output
     rotation = params[..., 4:5]  # radians, unbounded
-    # Color: direct output with clamp for full dynamic range
-    color = params[..., 5:8].clamp(0, 1)  # [0, 1]
-    # Opacity: direct output with clamp (allows exact 0/1 for sparsity)
-    opacity = params[..., 8:9].clamp(0, 1)  # [0, 1]
+
+    # Color: STE (Straight-Through Estimator)
+    # Forward: clamp to [0,1], Backward: gradient passes through unchanged
+    color_raw = params[..., 5:8]
+    color = color_raw + (color_raw.clamp(0, 1) - color_raw).detach()
+
+    # Opacity: STE (Straight-Through Estimator)
+    # Forward: clamp to [0,1], Backward: gradient passes through unchanged
+    opacity_raw = params[..., 8:9]
+    opacity = opacity_raw + (opacity_raw.clamp(0, 1) - opacity_raw).detach()
 
     return {
         'delta_mu': delta_mu,
