@@ -18,6 +18,12 @@ try:
 except ImportError:
     PYTORCH_MSSSIM_AVAILABLE = False
 
+try:
+    import lpips
+    LPIPS_AVAILABLE = True
+except ImportError:
+    LPIPS_AVAILABLE = False
+
 
 def gaussian_window(size: int, sigma: float, device: torch.device) -> torch.Tensor:
     """Create a Gaussian window for SSIM computation."""
@@ -87,13 +93,19 @@ def ssim_loss_pytorch(
 
 class ReconstructionLoss(nn.Module):
     """
-    Combined reconstruction loss with L1 and SSIM components.
+    Combined reconstruction loss with L1, SSIM, LPIPS, and Gaussian count components.
 
-    Loss = λ_l1 * L1 + λ_ssim * (1 - SSIM)
+    Loss = λ_l1 * L1 + λ_ssim * (1 - SSIM) + λ_lpips * LPIPS + λ_count * CountLoss
+
+    Count loss penalizes the effective number of Gaussians (sum of opacities).
+    If target_count is set, only penalizes when N_effective > target_count.
 
     Args:
         l1_weight: Weight for L1 loss (default: 0.8)
         ssim_weight: Weight for SSIM loss (default: 0.2)
+        lpips_weight: Weight for LPIPS loss (default: 0.0, disabled)
+        count_weight: Weight for count loss (default: 0.0, disabled)
+        target_count: Target number of effective Gaussians (default: None, penalize all)
         use_pytorch_msssim: Use pytorch_msssim library if available
     """
 
@@ -101,20 +113,38 @@ class ReconstructionLoss(nn.Module):
         self,
         l1_weight: float = 0.8,
         ssim_weight: float = 0.2,
+        lpips_weight: float = 0.0,
+        count_weight: float = 0.0,
+        target_count: Optional[int] = None,
         use_pytorch_msssim: bool = True,
     ):
         super().__init__()
         self.l1_weight = l1_weight
         self.ssim_weight = ssim_weight
+        self.lpips_weight = lpips_weight
+        self.count_weight = count_weight
+        self.target_count = target_count
         self.use_pytorch_msssim = use_pytorch_msssim and PYTORCH_MSSSIM_AVAILABLE
 
         if use_pytorch_msssim and not PYTORCH_MSSSIM_AVAILABLE:
             print("Warning: pytorch_msssim not available, using pure PyTorch SSIM")
 
+        # Initialize LPIPS if enabled
+        self.lpips_fn = None
+        if lpips_weight > 0:
+            if LPIPS_AVAILABLE:
+                self.lpips_fn = lpips.LPIPS(net='vgg').eval()
+                # Freeze LPIPS weights
+                for param in self.lpips_fn.parameters():
+                    param.requires_grad = False
+            else:
+                print("Warning: lpips not available, install with 'pip install lpips'")
+
     def forward(
         self,
         pred: torch.Tensor,
         target: torch.Tensor,
+        gaussians: Optional[Dict[str, torch.Tensor]] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         Compute reconstruction loss.
@@ -122,12 +152,16 @@ class ReconstructionLoss(nn.Module):
         Args:
             pred: Predicted image (B, 3, H, W) in [0, 1]
             target: Target image (B, 3, H, W) in [0, 1]
+            gaussians: Optional dict with 'opacities' tensor for count loss
 
         Returns:
             Dictionary with:
             - 'total': Combined loss
             - 'l1': L1 loss component
             - 'ssim': SSIM loss component
+            - 'lpips': LPIPS loss component (if enabled)
+            - 'count': Count loss component (if enabled)
+            - 'n_effective': Effective number of Gaussians
         """
         # L1 loss
         l1_loss = F.l1_loss(pred, target)
@@ -142,10 +176,43 @@ class ReconstructionLoss(nn.Module):
         # Combined loss
         total_loss = self.l1_weight * l1_loss + self.ssim_weight * ssim_loss
 
+        # LPIPS loss (if enabled)
+        lpips_loss = torch.tensor(0.0, device=pred.device)
+        if self.lpips_weight > 0 and self.lpips_fn is not None:
+            # LPIPS expects [-1, 1] range
+            pred_lpips = pred * 2 - 1
+            target_lpips = target * 2 - 1
+            # Move LPIPS model to same device if needed
+            if next(self.lpips_fn.parameters()).device != pred.device:
+                self.lpips_fn = self.lpips_fn.to(pred.device)
+            lpips_loss = self.lpips_fn(pred_lpips, target_lpips).mean()
+            total_loss = total_loss + self.lpips_weight * lpips_loss
+
+        # Count loss (if enabled)
+        count_loss = torch.tensor(0.0, device=pred.device)
+        n_effective = torch.tensor(0.0, device=pred.device)
+
+        if self.count_weight > 0 and gaussians is not None:
+            opacities = gaussians['opacities']  # (B, N, 1)
+            n_effective = opacities.sum() / opacities.shape[0]  # per-image average
+
+            if self.target_count is not None:
+                # Penalize only when exceeding target
+                count_loss = F.relu(n_effective - self.target_count)
+            else:
+                # Penalize total count (normalized by total slots)
+                n_total = opacities.shape[1]
+                count_loss = n_effective / n_total
+
+            total_loss = total_loss + self.count_weight * count_loss
+
         return {
             'total': total_loss,
             'l1': l1_loss,
             'ssim': ssim_loss,
+            'lpips': lpips_loss,
+            'count': count_loss,
+            'n_effective': n_effective,
         }
 
 

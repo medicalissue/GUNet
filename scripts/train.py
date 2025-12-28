@@ -63,6 +63,12 @@ def parse_args():
                         help='L1 loss weight')
     parser.add_argument('--ssim_weight', type=float, default=0.2,
                         help='SSIM loss weight')
+    parser.add_argument('--lpips_weight', type=float, default=0.0,
+                        help='LPIPS perceptual loss weight (0 to disable)')
+    parser.add_argument('--count_weight', type=float, default=0.0,
+                        help='Gaussian count loss weight (0 to disable)')
+    parser.add_argument('--target_count', type=int, default=None,
+                        help='Target number of effective Gaussians')
 
     # Checkpointing
     parser.add_argument('--save_dir', type=str, default='./checkpoints',
@@ -103,6 +109,10 @@ def parse_args():
     args.lr = float(args.lr)
     args.l1_weight = float(args.l1_weight)
     args.ssim_weight = float(args.ssim_weight)
+    args.lpips_weight = float(args.lpips_weight)
+    args.count_weight = float(args.count_weight)
+    if args.target_count is not None:
+        args.target_count = int(args.target_count)
 
     # Print loaded config
     print(f"=== Config ===")
@@ -343,6 +353,8 @@ def train_one_epoch(
     total_loss = 0.0
     total_l1 = 0.0
     total_ssim = 0.0
+    total_count = 0.0
+    total_n_eff = 0.0
     num_batches = 0
 
     pbar = tqdm(dataloader, desc=f'Epoch {epoch}')
@@ -360,8 +372,8 @@ def train_one_epoch(
         # Render Gaussians
         rendered = render_gaussians_2d(gaussians, H, W)
 
-        # Compute loss
-        losses = criterion(rendered, images)
+        # Compute loss (pass gaussians for count loss)
+        losses = criterion(rendered, images, gaussians)
         loss = losses['total']
 
         # Backward pass
@@ -372,14 +384,21 @@ def train_one_epoch(
         total_loss += loss.item()
         total_l1 += losses['l1'].item()
         total_ssim += losses['ssim'].item()
+        total_count += losses['count'].item()
+        total_n_eff += losses['n_effective'].item()
         num_batches += 1
 
         # Update progress bar
-        pbar.set_postfix({
+        postfix = {
             'loss': f'{loss.item():.4f}',
             'l1': f'{losses["l1"].item():.4f}',
             'ssim': f'{losses["ssim"].item():.4f}',
-        })
+        }
+        if criterion.lpips_weight > 0:
+            postfix['lpips'] = f'{losses["lpips"].item():.4f}'
+        if criterion.count_weight > 0:
+            postfix['n_eff'] = f'{losses["n_effective"].item():.0f}'
+        pbar.set_postfix(postfix)
 
         # Visualization
         if batch_idx % vis_every == 0:
@@ -395,6 +414,8 @@ def train_one_epoch(
         'loss': total_loss / num_batches,
         'l1': total_l1 / num_batches,
         'ssim': total_ssim / num_batches,
+        'count': total_count / num_batches,
+        'n_effective': total_n_eff / num_batches,
     }
 
 
@@ -437,7 +458,11 @@ def validate(
 
 def plot_training_curves(history: dict, save_path: str):
     """Plot training loss curves."""
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    # Check if n_effective tracking is enabled
+    has_n_eff = 'n_effective' in history and any(v > 0 for v in history['n_effective'])
+    n_plots = 4 if has_n_eff else 3
+
+    fig, axes = plt.subplots(1, n_plots, figsize=(5 * n_plots, 4))
 
     epochs = range(len(history['loss']))
 
@@ -458,6 +483,13 @@ def plot_training_curves(history: dict, save_path: str):
     axes[2].set_ylabel('SSIM Loss')
     axes[2].set_title('SSIM Loss (1 - SSIM)')
     axes[2].grid(True)
+
+    if has_n_eff:
+        axes[3].plot(epochs, history['n_effective'], 'm-', label='N Effective')
+        axes[3].set_xlabel('Epoch')
+        axes[3].set_ylabel('Count')
+        axes[3].set_title('Effective Gaussians')
+        axes[3].grid(True)
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
@@ -514,7 +546,14 @@ def main():
     criterion = ReconstructionLoss(
         l1_weight=args.l1_weight,
         ssim_weight=args.ssim_weight,
+        lpips_weight=args.lpips_weight,
+        count_weight=args.count_weight,
+        target_count=args.target_count,
     )
+    if args.lpips_weight > 0:
+        print(f'LPIPS loss enabled: weight={args.lpips_weight}')
+    if args.count_weight > 0:
+        print(f'Count loss enabled: weight={args.count_weight}, target={args.target_count}')
 
     # Optimizer
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
@@ -528,7 +567,7 @@ def main():
         start_epoch = load_checkpoint(model, optimizer, args.resume, device)
 
     # Training history
-    history = {'loss': [], 'l1': [], 'ssim': []}
+    history = {'loss': [], 'l1': [], 'ssim': [], 'n_effective': []}
 
     # Training loop
     best_loss = float('inf')
@@ -547,10 +586,14 @@ def main():
         history['loss'].append(train_metrics['loss'])
         history['l1'].append(train_metrics['l1'])
         history['ssim'].append(train_metrics['ssim'])
+        history['n_effective'].append(train_metrics['n_effective'])
 
         # Print metrics
-        print(f'Epoch {epoch}: loss={train_metrics["loss"]:.4f}, '
-              f'l1={train_metrics["l1"]:.4f}, ssim={train_metrics["ssim"]:.4f}')
+        msg = (f'Epoch {epoch}: loss={train_metrics["loss"]:.4f}, '
+               f'l1={train_metrics["l1"]:.4f}, ssim={train_metrics["ssim"]:.4f}')
+        if args.count_weight > 0:
+            msg += f', n_eff={train_metrics["n_effective"]:.0f}'
+        print(msg)
 
         # Plot training curves
         plot_training_curves(history, str(vis_dir / 'training_curves.png'))

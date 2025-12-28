@@ -53,7 +53,8 @@ def parse_gaussian_params(raw_params: torch.Tensor) -> Dict[str, torch.Tensor]:
     delta_mu = torch.tanh(params[..., 0:2]) * 0.5  # [-0.5, 0.5]
     scale = torch.exp(params[..., 2:4])  # positive, log-space output
     rotation = params[..., 4:5]  # radians, unbounded
-    color = torch.sigmoid(params[..., 5:8])  # [0, 1]
+    # Color: direct output with clamp for full dynamic range
+    color = params[..., 5:8].clamp(0, 1)  # [0, 1]
     opacity = torch.sigmoid(params[..., 8:9])  # [0, 1]
 
     return {

@@ -1,13 +1,13 @@
 # Multi-Scale Gaussian UNet Configuration
 
 # Data
-data_dir: /data/coco/train2017/ #./data/CLEVR_v1.0/images/train
+data_dir: /data/ImageNet/train/ #./data/CLEVR_v1.0/images/train
 image_size: 256
 
 # Model
 base_channels: 64
-num_levels: 5        # Total encoder/decoder levels
-start_level: 1       # Start Gaussian output from this level (0=full res, 1=half, 2=quarter...)
+num_levels: 8        # Total encoder/decoder levels
+start_level: 0       # Start Gaussian output from this level (0=full res, 1=half, 2=quarter...)
                      # start_level=1 means: 128x128, 64x64, 32x32, 16x16 (skip 256x256)
 
 # Training
@@ -19,6 +19,9 @@ num_workers: 4
 # Loss weights
 l1_weight: 0.8
 ssim_weight: 0.2
+lpips_weight: 0.1        # Weight for LPIPS perceptual loss (0 to disable)
+count_weight: 1.0        # Weight for Gaussian count loss (0 to disable)
+target_count: null       # Target number of effective Gaussians (null to penalize all)
 
 # Checkpointing
 save_dir: ./checkpoints
@@ -26,7 +29,7 @@ save_every: 10
 
 # Visualization
 vis_dir: ./visualizations
-vis_every: 10000  # Visualize every N batches
+vis_every: 1000  # Visualize every N batches
 
 # Device
 device: cuda
