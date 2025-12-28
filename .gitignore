@@ -1,0 +1,9 @@
+checkpoints/
+data/
+outputs/
+visualizations/
+*.pth
+*.png
+*.jpg
+*.pt
+*.pth
