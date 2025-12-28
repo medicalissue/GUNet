@@ -59,10 +59,8 @@ def parse_gaussian_params(raw_params: torch.Tensor) -> Dict[str, torch.Tensor]:
     color_raw = params[..., 5:8]
     color = color_raw + (color_raw.clamp(0, 1) - color_raw).detach()
 
-    # Opacity: STE (Straight-Through Estimator)
-    # Forward: clamp to [0,1], Backward: gradient passes through unchanged
-    opacity_raw = params[..., 8:9]
-    opacity = opacity_raw + (opacity_raw.clamp(0, 1) - opacity_raw).detach()
+    # Opacity: sigmoid for smooth [0,1] mapping
+    opacity = torch.sigmoid(params[..., 8:9])
 
     return {
         'delta_mu': delta_mu,

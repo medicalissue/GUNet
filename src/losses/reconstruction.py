@@ -93,12 +93,12 @@ def ssim_loss_pytorch(
 
 class ReconstructionLoss(nn.Module):
     """
-    Combined reconstruction loss with L1, SSIM, LPIPS, and Gaussian count components.
+    Combined reconstruction loss with L1, SSIM, LPIPS, count, and scale components.
 
-    Loss = λ_l1 * L1 + λ_ssim * (1 - SSIM) + λ_lpips * LPIPS + λ_count * CountLoss
+    Loss = λ_l1 * L1 + λ_ssim * (1 - SSIM) + λ_lpips * LPIPS + λ_count * CountLoss + λ_scale * ScaleLoss
 
     Count loss penalizes the effective number of Gaussians (sum of opacities).
-    If target_count is set, only penalizes when N_effective > target_count.
+    Scale loss penalizes small Gaussians - smaller scale = larger penalty.
 
     Args:
         l1_weight: Weight for L1 loss (default: 0.8)
@@ -106,6 +106,7 @@ class ReconstructionLoss(nn.Module):
         lpips_weight: Weight for LPIPS loss (default: 0.0, disabled)
         count_weight: Weight for count loss (default: 0.0, disabled)
         target_count: Target number of effective Gaussians (default: None, penalize all)
+        scale_weight: Weight for scale loss (default: 0.0, disabled)
         use_pytorch_msssim: Use pytorch_msssim library if available
     """
 
@@ -116,6 +117,7 @@ class ReconstructionLoss(nn.Module):
         lpips_weight: float = 0.0,
         count_weight: float = 0.0,
         target_count: Optional[int] = None,
+        scale_weight: float = 0.0,
         use_pytorch_msssim: bool = True,
     ):
         super().__init__()
@@ -124,6 +126,7 @@ class ReconstructionLoss(nn.Module):
         self.lpips_weight = lpips_weight
         self.count_weight = count_weight
         self.target_count = target_count
+        self.scale_weight = scale_weight
         self.use_pytorch_msssim = use_pytorch_msssim and PYTORCH_MSSSIM_AVAILABLE
 
         if use_pytorch_msssim and not PYTORCH_MSSSIM_AVAILABLE:
@@ -206,13 +209,36 @@ class ReconstructionLoss(nn.Module):
 
             total_loss = total_loss + self.count_weight * count_loss
 
+        # Scale loss (if enabled) - inverse penalty for small scales
+        scale_loss = torch.tensor(0.0, device=pred.device)
+        avg_scale = torch.tensor(0.0, device=pred.device)
+
+        if self.scale_weight > 0 and gaussians is not None:
+            scales = gaussians['scales']  # (B, N, 2)
+            # Use mean of x,y scales per Gaussian
+            scale_mean = scales.mean(dim=-1)  # (B, N)
+
+            # Inverse penalty: smaller scale = larger penalty
+            # 1 / (scale + 1) gives:
+            #   - scale=0: penalty = 1.0
+            #   - scale=1: penalty = 0.5
+            #   - scale=3: penalty = 0.25
+            #   - scale=9: penalty = 0.1
+            #   - scale→∞: penalty → 0
+            scale_loss = (1.0 / (scale_mean + 1.0)).mean()
+            avg_scale = scale_mean.mean()
+
+            total_loss = total_loss + self.scale_weight * scale_loss
+
         return {
             'total': total_loss,
             'l1': l1_loss,
             'ssim': ssim_loss,
             'lpips': lpips_loss,
             'count': count_loss,
+            'scale': scale_loss,
             'n_effective': n_effective,
+            'avg_scale': avg_scale,
         }
 
 

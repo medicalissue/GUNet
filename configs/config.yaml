@@ -20,8 +20,9 @@ num_workers: 4
 l1_weight: 0.8
 ssim_weight: 0.2
 lpips_weight: 0.1        # Weight for LPIPS perceptual loss (0 to disable)
-count_weight: 1.0        # Weight for Gaussian count loss (0 to disable)
-target_count: null       # Target number of effective Gaussians (null to penalize all)
+count_weight: 0.0     # Weight for Gaussian count loss (0 to disable)
+target_count: 2048       # Target number of effective Gaussians (null to penalize all)
+scale_weight: 0.0       # Weight for scale loss - penalizes small scales (0 to disable)
 
 # Checkpointing
 save_dir: ./checkpoints

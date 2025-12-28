@@ -69,6 +69,8 @@ def parse_args():
                         help='Gaussian count loss weight (0 to disable)')
     parser.add_argument('--target_count', type=int, default=None,
                         help='Target number of effective Gaussians')
+    parser.add_argument('--scale_weight', type=float, default=0.0,
+                        help='Scale loss weight - penalizes small scales (0 to disable)')
 
     # Checkpointing
     parser.add_argument('--save_dir', type=str, default='./checkpoints',
@@ -111,6 +113,7 @@ def parse_args():
     args.ssim_weight = float(args.ssim_weight)
     args.lpips_weight = float(args.lpips_weight)
     args.count_weight = float(args.count_weight)
+    args.scale_weight = float(args.scale_weight)
     if args.target_count is not None:
         args.target_count = int(args.target_count)
 
@@ -355,6 +358,7 @@ def train_one_epoch(
     total_ssim = 0.0
     total_count = 0.0
     total_n_eff = 0.0
+    total_avg_scale = 0.0
     num_batches = 0
 
     pbar = tqdm(dataloader, desc=f'Epoch {epoch}')
@@ -386,6 +390,7 @@ def train_one_epoch(
         total_ssim += losses['ssim'].item()
         total_count += losses['count'].item()
         total_n_eff += losses['n_effective'].item()
+        total_avg_scale += losses['avg_scale'].item()
         num_batches += 1
 
         # Update progress bar
@@ -398,6 +403,8 @@ def train_one_epoch(
             postfix['lpips'] = f'{losses["lpips"].item():.4f}'
         if criterion.count_weight > 0:
             postfix['n_eff'] = f'{losses["n_effective"].item():.0f}'
+        if criterion.scale_weight > 0:
+            postfix['avg_s'] = f'{losses["avg_scale"].item():.2f}'
         pbar.set_postfix(postfix)
 
         # Visualization
@@ -416,6 +423,7 @@ def train_one_epoch(
         'ssim': total_ssim / num_batches,
         'count': total_count / num_batches,
         'n_effective': total_n_eff / num_batches,
+        'avg_scale': total_avg_scale / num_batches,
     }
 
 
@@ -458,9 +466,10 @@ def validate(
 
 def plot_training_curves(history: dict, save_path: str):
     """Plot training loss curves."""
-    # Check if n_effective tracking is enabled
+    # Check which optional metrics are being tracked
     has_n_eff = 'n_effective' in history and any(v > 0 for v in history['n_effective'])
-    n_plots = 4 if has_n_eff else 3
+    has_avg_scale = 'avg_scale' in history and any(v > 0 for v in history['avg_scale'])
+    n_plots = 3 + int(has_n_eff) + int(has_avg_scale)
 
     fig, axes = plt.subplots(1, n_plots, figsize=(5 * n_plots, 4))
 
@@ -484,12 +493,21 @@ def plot_training_curves(history: dict, save_path: str):
     axes[2].set_title('SSIM Loss (1 - SSIM)')
     axes[2].grid(True)
 
+    plot_idx = 3
     if has_n_eff:
-        axes[3].plot(epochs, history['n_effective'], 'm-', label='N Effective')
-        axes[3].set_xlabel('Epoch')
-        axes[3].set_ylabel('Count')
-        axes[3].set_title('Effective Gaussians')
-        axes[3].grid(True)
+        axes[plot_idx].plot(epochs, history['n_effective'], 'm-', label='N Effective')
+        axes[plot_idx].set_xlabel('Epoch')
+        axes[plot_idx].set_ylabel('Count')
+        axes[plot_idx].set_title('Effective Gaussians')
+        axes[plot_idx].grid(True)
+        plot_idx += 1
+
+    if has_avg_scale:
+        axes[plot_idx].plot(epochs, history['avg_scale'], 'c-', label='Avg Scale')
+        axes[plot_idx].set_xlabel('Epoch')
+        axes[plot_idx].set_ylabel('Scale')
+        axes[plot_idx].set_title('Average Scale')
+        axes[plot_idx].grid(True)
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
@@ -549,11 +567,14 @@ def main():
         lpips_weight=args.lpips_weight,
         count_weight=args.count_weight,
         target_count=args.target_count,
+        scale_weight=args.scale_weight,
     )
     if args.lpips_weight > 0:
         print(f'LPIPS loss enabled: weight={args.lpips_weight}')
     if args.count_weight > 0:
         print(f'Count loss enabled: weight={args.count_weight}, target={args.target_count}')
+    if args.scale_weight > 0:
+        print(f'Scale loss enabled: weight={args.scale_weight}')
 
     # Optimizer
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
@@ -567,7 +588,7 @@ def main():
         start_epoch = load_checkpoint(model, optimizer, args.resume, device)
 
     # Training history
-    history = {'loss': [], 'l1': [], 'ssim': [], 'n_effective': []}
+    history = {'loss': [], 'l1': [], 'ssim': [], 'n_effective': [], 'avg_scale': []}
 
     # Training loop
     best_loss = float('inf')
@@ -587,12 +608,15 @@ def main():
         history['l1'].append(train_metrics['l1'])
         history['ssim'].append(train_metrics['ssim'])
         history['n_effective'].append(train_metrics['n_effective'])
+        history['avg_scale'].append(train_metrics['avg_scale'])
 
         # Print metrics
         msg = (f'Epoch {epoch}: loss={train_metrics["loss"]:.4f}, '
                f'l1={train_metrics["l1"]:.4f}, ssim={train_metrics["ssim"]:.4f}')
         if args.count_weight > 0:
             msg += f', n_eff={train_metrics["n_effective"]:.0f}'
+        if args.scale_weight > 0:
+            msg += f', avg_s={train_metrics["avg_scale"]:.2f}'
         print(msg)
 
         # Plot training curves
