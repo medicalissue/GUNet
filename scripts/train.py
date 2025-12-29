@@ -31,6 +31,37 @@ from src.data import ImageDataset
 from torch.utils.data import DataLoader
 
 
+def compute_psnr(pred: torch.Tensor, target: torch.Tensor) -> float:
+    """Compute PSNR between pred and target images."""
+    mse = torch.mean((pred - target) ** 2).item()
+    if mse == 0:
+        return float('inf')
+    return 10 * np.log10(1.0 / mse)
+
+
+def compute_bpp(n_gaussians: int, H: int, W: int, bits_per_param: int = 32) -> float:
+    """
+    Compute Bits Per Pixel for Gaussian representation.
+
+    Each Gaussian has 9 parameters (delta_mu:2, scale:2, rotation:1, color:3, opacity:1).
+    BPP = (N_gaussians * 9 * bits_per_param) / (H * W)
+    """
+    total_bits = n_gaussians * 9 * bits_per_param
+    return total_bits / (H * W)
+
+
+def compute_effective_bpp(gaussians: dict, H: int, W: int, bits_per_param: int = 32) -> float:
+    """
+    Compute effective BPP weighted by opacity.
+
+    Only counts Gaussians with opacity > 0.5 as "active".
+    """
+    opacities = gaussians['opacities']  # (B, N, 1)
+    n_effective = (opacities > 0.5).float().sum().item() / opacities.shape[0]
+    total_bits = n_effective * 9 * bits_per_param
+    return total_bits / (H * W)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Train Multi-Scale Gaussian UNet')
 
@@ -193,6 +224,12 @@ def visualize_reconstruction(
     # Render full reconstruction
     rendered = render_gaussians_2d(gaussians, H, W)
 
+    # Compute metrics
+    psnr = compute_psnr(rendered, images)
+    n_gaussians = gaussians['means'].shape[1]
+    bpp = compute_bpp(n_gaussians, H, W)
+    bpp_eff = compute_effective_bpp(gaussians, H, W)
+
     # Take first image in batch
     orig = images[0].cpu().permute(1, 2, 0).numpy()
     recon = rendered[0].cpu().permute(1, 2, 0).numpy()
@@ -208,7 +245,7 @@ def visualize_reconstruction(
     axes[0, 0].axis('off')
 
     axes[0, 1].imshow(recon.clip(0, 1))
-    axes[0, 1].set_title(f'Reconstructed\nL1={np.mean(diff):.4f}')
+    axes[0, 1].set_title(f'Reconstructed\nPSNR={psnr:.2f}dB\nBPP={bpp:.2f} (eff={bpp_eff:.2f})')
     axes[0, 1].axis('off')
 
     # Render each level separately
@@ -359,6 +396,7 @@ def train_one_epoch(
     total_count = 0.0
     total_n_eff = 0.0
     total_avg_scale = 0.0
+    total_psnr = 0.0
     num_batches = 0
 
     pbar = tqdm(dataloader, desc=f'Epoch {epoch}')
@@ -380,6 +418,10 @@ def train_one_epoch(
         losses = criterion(rendered, images, gaussians)
         loss = losses['total']
 
+        # Compute PSNR
+        with torch.no_grad():
+            psnr = compute_psnr(rendered, images)
+
         # Backward pass
         loss.backward()
         optimizer.step()
@@ -391,11 +433,13 @@ def train_one_epoch(
         total_count += losses['count'].item()
         total_n_eff += losses['n_effective'].item()
         total_avg_scale += losses['avg_scale'].item()
+        total_psnr += psnr
         num_batches += 1
 
         # Update progress bar
         postfix = {
             'loss': f'{loss.item():.4f}',
+            'psnr': f'{psnr:.2f}',
             'l1': f'{losses["l1"].item():.4f}',
             'ssim': f'{losses["ssim"].item():.4f}',
         }
@@ -424,6 +468,7 @@ def train_one_epoch(
         'count': total_count / num_batches,
         'n_effective': total_n_eff / num_batches,
         'avg_scale': total_avg_scale / num_batches,
+        'psnr': total_psnr / num_batches,
     }
 
 
@@ -469,7 +514,8 @@ def plot_training_curves(history: dict, save_path: str):
     # Check which optional metrics are being tracked
     has_n_eff = 'n_effective' in history and any(v > 0 for v in history['n_effective'])
     has_avg_scale = 'avg_scale' in history and any(v > 0 for v in history['avg_scale'])
-    n_plots = 3 + int(has_n_eff) + int(has_avg_scale)
+    has_psnr = 'psnr' in history and len(history['psnr']) > 0
+    n_plots = 3 + int(has_n_eff) + int(has_avg_scale) + int(has_psnr)
 
     fig, axes = plt.subplots(1, n_plots, figsize=(5 * n_plots, 4))
 
@@ -494,6 +540,14 @@ def plot_training_curves(history: dict, save_path: str):
     axes[2].grid(True)
 
     plot_idx = 3
+    if has_psnr:
+        axes[plot_idx].plot(epochs, history['psnr'], 'orange', label='PSNR')
+        axes[plot_idx].set_xlabel('Epoch')
+        axes[plot_idx].set_ylabel('PSNR (dB)')
+        axes[plot_idx].set_title('PSNR')
+        axes[plot_idx].grid(True)
+        plot_idx += 1
+
     if has_n_eff:
         axes[plot_idx].plot(epochs, history['n_effective'], 'm-', label='N Effective')
         axes[plot_idx].set_xlabel('Epoch')
@@ -588,7 +642,7 @@ def main():
         start_epoch = load_checkpoint(model, optimizer, args.resume, device)
 
     # Training history
-    history = {'loss': [], 'l1': [], 'ssim': [], 'n_effective': [], 'avg_scale': []}
+    history = {'loss': [], 'l1': [], 'ssim': [], 'n_effective': [], 'avg_scale': [], 'psnr': []}
 
     # Training loop
     best_loss = float('inf')
@@ -609,9 +663,11 @@ def main():
         history['ssim'].append(train_metrics['ssim'])
         history['n_effective'].append(train_metrics['n_effective'])
         history['avg_scale'].append(train_metrics['avg_scale'])
+        history['psnr'].append(train_metrics['psnr'])
 
         # Print metrics
         msg = (f'Epoch {epoch}: loss={train_metrics["loss"]:.4f}, '
+               f'psnr={train_metrics["psnr"]:.2f}dB, '
                f'l1={train_metrics["l1"]:.4f}, ssim={train_metrics["ssim"]:.4f}')
         if args.count_weight > 0:
             msg += f', n_eff={train_metrics["n_effective"]:.0f}'
