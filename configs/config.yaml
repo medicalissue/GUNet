@@ -10,7 +10,7 @@ base_channels: 64
 num_levels: 4        # Total encoder/decoder levels
 start_level: 0       # Start Gaussian output from this level (only for unet)
                      # start_level=1 means: 128x128, 64x64, 32x32, 16x16 (skip 256x256)
-pool_type: attn       # Pooling type: 'max', 'avg', 'attn' (attention), 'strided' (strided conv)
+pool_type: strided       # Pooling type: 'max', 'avg', 'attn' (attention), 'strided' (strided conv)
 pad_type: zero     # Padding type: 'zero', 'reflect', 'replicate', 'circular'
 
 # Training
@@ -30,7 +30,7 @@ sparsity_weight: 0.0     # Weight for sparsity loss - encourages binary opacity 
 
 # Top-k selection
 use_topk: true           # Use top-k importance selection (STE: forward=hard, backward=soft)
-topk_count: 256         # Number of Gaussians to render (top-k by importance)
+topk_count: 5096         # Number of Gaussians to render (top-k by importance)
 topk_temperature: 1.0    # Soft gate sharpness (>1: sharper, <1: softer)
 
 # Rendering
