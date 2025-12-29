@@ -415,6 +415,7 @@ def visualize_gaussians_detail(
 ):
     """
     Detailed visualization of Gaussian parameters.
+    Includes: importance map, scale spatial distribution, opacity, colors, etc.
     """
     model.eval()
 
@@ -430,47 +431,90 @@ def visualize_gaussians_detail(
     opacities = gaussians['opacities'][0].cpu().numpy().squeeze()
     colors = gaussians['colors'][0].cpu().numpy()
 
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    # Check if importance is available (GaussianSplitNet)
+    has_importance = 'importance' in gaussians and gaussians['importance'] is not None
+    if has_importance:
+        importance = gaussians['importance'][0].cpu().numpy().squeeze()
 
-    # Mean positions colored by opacity
-    sc = axes[0, 0].scatter(means[:, 0], means[:, 1], c=opacities, s=1, cmap='hot', alpha=0.5)
-    axes[0, 0].set_xlim(0, W)
-    axes[0, 0].set_ylim(H, 0)
-    axes[0, 0].set_title('Gaussian Positions (color=opacity)')
-    axes[0, 0].set_aspect('equal')
-    plt.colorbar(sc, ax=axes[0, 0])
+    fig, axes = plt.subplots(3, 3, figsize=(15, 15))
 
-    # Scale distribution
-    axes[0, 1].hist2d(scales[:, 0], scales[:, 1], bins=50, cmap='Blues')
-    axes[0, 1].set_xlabel('Scale X')
-    axes[0, 1].set_ylabel('Scale Y')
-    axes[0, 1].set_title('Scale Distribution')
-
-    # Opacity distribution
-    axes[0, 2].hist(opacities, bins=50, alpha=0.7)
-    axes[0, 2].set_xlabel('Opacity')
-    axes[0, 2].set_title(f'Opacity Distribution\nmean={opacities.mean():.3f}')
-
-    # Color distribution (RGB channels)
-    for i, (c, name) in enumerate(zip([0, 1, 2], ['R', 'G', 'B'])):
-        axes[1, 0].hist(colors[:, c], bins=50, alpha=0.5, label=name)
-    axes[1, 0].legend()
-    axes[1, 0].set_title('Color Distribution')
-
-    # Mean scale vs position
-    mean_scales = scales.mean(axis=1)
-    sc = axes[1, 1].scatter(means[:, 0], means[:, 1], c=mean_scales, s=1, cmap='viridis', alpha=0.5)
-    axes[1, 1].set_xlim(0, W)
-    axes[1, 1].set_ylim(H, 0)
-    axes[1, 1].set_title('Positions (color=scale)')
-    axes[1, 1].set_aspect('equal')
-    plt.colorbar(sc, ax=axes[1, 1])
-
-    # Rendered vs original
+    # Row 0: Original, Rendered, Difference
+    orig = images[0].cpu().permute(1, 2, 0).numpy()
     rendered = render_gaussians_2d(gaussians, H, W)
-    axes[1, 2].imshow(rendered[0].cpu().permute(1, 2, 0).numpy().clip(0, 1))
-    axes[1, 2].set_title('Rendered')
+    recon = rendered[0].cpu().permute(1, 2, 0).numpy()
+    diff = np.abs(orig - recon)
+
+    axes[0, 0].imshow(orig.clip(0, 1))
+    axes[0, 0].set_title('Original')
+    axes[0, 0].axis('off')
+
+    axes[0, 1].imshow(recon.clip(0, 1))
+    axes[0, 1].set_title('Rendered')
+    axes[0, 1].axis('off')
+
+    axes[0, 2].imshow(diff.clip(0, 1))
+    axes[0, 2].set_title('Difference')
+    axes[0, 2].axis('off')
+
+    # Row 1: Importance map, Scale map, Opacity map (as spatial heatmaps)
+    # Importance map (reshape to HxW)
+    if has_importance:
+        importance_map = importance.reshape(H, W)
+        im = axes[1, 0].imshow(importance_map, cmap='hot', vmin=0, vmax=1)
+        axes[1, 0].set_title(f'Importance Map\nmean={importance.mean():.3f}, max={importance.max():.3f}')
+        axes[1, 0].axis('off')
+        plt.colorbar(im, ax=axes[1, 0], fraction=0.046)
+    else:
+        axes[1, 0].text(0.5, 0.5, 'No importance\n(not GaussianSplitNet)',
+                       ha='center', va='center', transform=axes[1, 0].transAxes)
+        axes[1, 0].set_title('Importance Map')
+        axes[1, 0].axis('off')
+
+    # Scale map (mean of scale_x and scale_y, reshape to HxW)
+    mean_scales = scales.mean(axis=1)
+    scale_map = mean_scales.reshape(H, W)
+    im = axes[1, 1].imshow(scale_map, cmap='viridis')
+    axes[1, 1].set_title(f'Scale Map (mean)\nmean={mean_scales.mean():.2f}, max={mean_scales.max():.2f}')
+    axes[1, 1].axis('off')
+    plt.colorbar(im, ax=axes[1, 1], fraction=0.046)
+
+    # Opacity map (reshape to HxW)
+    opacity_map = opacities.reshape(H, W)
+    im = axes[1, 2].imshow(opacity_map, cmap='gray', vmin=0, vmax=1)
+    axes[1, 2].set_title(f'Opacity Map\nmean={opacities.mean():.3f}')
     axes[1, 2].axis('off')
+    plt.colorbar(im, ax=axes[1, 2], fraction=0.046)
+
+    # Row 2: Histograms - Scale distribution, Opacity distribution, Importance distribution
+    # Scale histogram (2D: scale_x vs scale_y)
+    axes[2, 0].hist2d(scales[:, 0], scales[:, 1], bins=50, cmap='Blues')
+    axes[2, 0].set_xlabel('Scale X')
+    axes[2, 0].set_ylabel('Scale Y')
+    axes[2, 0].set_title(f'Scale Distribution\nmean_x={scales[:,0].mean():.2f}, mean_y={scales[:,1].mean():.2f}')
+    axes[2, 0].set_aspect('equal')
+
+    # Opacity histogram
+    axes[2, 1].hist(opacities, bins=50, alpha=0.7, color='gray')
+    axes[2, 1].axvline(x=0.5, color='r', linestyle='--', label='threshold=0.5')
+    n_active = (opacities > 0.5).sum()
+    axes[2, 1].set_xlabel('Opacity')
+    axes[2, 1].set_title(f'Opacity Distribution\n{n_active}/{len(opacities)} active (>{0.5})')
+    axes[2, 1].legend()
+
+    # Importance histogram (if available) or Color distribution
+    if has_importance:
+        axes[2, 2].hist(importance, bins=50, alpha=0.7, color='orange')
+        axes[2, 2].axvline(x=0.5, color='r', linestyle='--', label='threshold=0.5')
+        n_important = (importance > 0.5).sum()
+        axes[2, 2].set_xlabel('Importance')
+        axes[2, 2].set_title(f'Importance Distribution\n{n_important}/{len(importance)} important (>{0.5})')
+        axes[2, 2].legend()
+    else:
+        # Color distribution (RGB channels)
+        for i, (ch, name) in enumerate(zip([0, 1, 2], ['R', 'G', 'B'])):
+            axes[2, 2].hist(colors[:, ch], bins=50, alpha=0.5, label=name)
+        axes[2, 2].legend()
+        axes[2, 2].set_title('Color Distribution')
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
@@ -579,7 +623,7 @@ def train_one_epoch(
             visualize_reconstruction(model, images, str(vis_path), epoch, batch_idx)
 
             # Detailed visualization every 10x vis_every
-            if batch_idx % (vis_every * 10) == 0:
+            if batch_idx % (vis_every) == 0:
                 detail_path = vis_dir / f'detail_epoch{epoch:04d}_batch{batch_idx:06d}.png'
                 visualize_gaussians_detail(model, images, str(detail_path))
 

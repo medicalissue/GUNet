@@ -1,7 +1,7 @@
 # Multi-Scale Gaussian UNet Configuration
 
 # Data
-data_dir: /data/ImageNet/train/ #./data/CLEVR_v1.0/images/train
+data_dir: ./data/CLEVR_v1.0/images/train #/data/ImageNet/train/ #
 image_size: 256
 
 # Model
