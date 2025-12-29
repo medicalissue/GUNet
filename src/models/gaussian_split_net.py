@@ -32,17 +32,57 @@ class DoubleConv(nn.Module):
         return self.net(x)
 
 
-class Down(nn.Module):
-    """MaxPool -> DoubleConv"""
-    def __init__(self, in_ch, out_ch):
+class AttentionPool2d(nn.Module):
+    """Attention-based 2x2 pooling - learns which pixels to attend to."""
+    def __init__(self, in_ch):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.MaxPool2d(2),
-            DoubleConv(in_ch, out_ch)
-        )
+        self.attn_conv = nn.Conv2d(in_ch, 1, kernel_size=1)
 
     def forward(self, x):
-        return self.net(x)
+        B, C, H, W = x.shape
+        # Reshape to 2x2 blocks
+        x = x.view(B, C, H // 2, 2, W // 2, 2)  # (B, C, H/2, 2, W/2, 2)
+        x = x.permute(0, 1, 2, 4, 3, 5)  # (B, C, H/2, W/2, 2, 2)
+        x = x.reshape(B, C, H // 2, W // 2, 4)  # (B, C, H/2, W/2, 4)
+
+        # Compute attention weights for 2x2 blocks
+        # Use mean pooled features to compute attention
+        x_for_attn = x.mean(dim=1, keepdim=True)  # (B, 1, H/2, W/2, 4)
+        attn = F.softmax(x_for_attn, dim=-1)  # (B, 1, H/2, W/2, 4)
+
+        # Apply attention
+        out = (x * attn).sum(dim=-1)  # (B, C, H/2, W/2)
+        return out
+
+
+class Down(nn.Module):
+    """Downsample -> DoubleConv with configurable pooling."""
+    def __init__(self, in_ch, out_ch, pool_type: str = "max"):
+        super().__init__()
+        self.pool_type = pool_type
+
+        if pool_type == "max":
+            self.pool = nn.MaxPool2d(2)
+        elif pool_type == "avg":
+            self.pool = nn.AvgPool2d(2)
+        elif pool_type == "attn":
+            self.pool = AttentionPool2d(in_ch)
+        elif pool_type == "strided":
+            # Strided conv does pooling + channel change together
+            self.pool = nn.Sequential(
+                nn.ReflectionPad2d(1),
+                nn.Conv2d(in_ch, in_ch, kernel_size=3, stride=2, padding=0, bias=False),
+                nn.BatchNorm2d(in_ch),
+                nn.ReLU(inplace=True),
+            )
+        else:
+            raise ValueError(f"Unknown pool_type: {pool_type}. Use 'max', 'avg', 'attn', or 'strided'")
+
+        self.conv = DoubleConv(in_ch, out_ch)
+
+    def forward(self, x):
+        x = self.pool(x)
+        return self.conv(x)
 
 
 class Up(nn.Module):
@@ -66,18 +106,25 @@ class Up(nn.Module):
 
 class GaussianSplitNet(nn.Module):
     """
-    Simple UNet for 10-channel Gaussian prediction.
+    Simple UNet for 11-channel Gaussian prediction.
 
     Architecture:
-        3 -> 64 -> 128 -> 256 -> 512 -> 256 -> 128 -> 64 -> 10
+        3 -> 64 -> 128 -> 256 -> 512 -> 256 -> 128 -> 64 -> 11
 
-    Output: 10 channels per pixel
+    Output: 11 channels per pixel
         - delta_mu (2): position offset
         - scale (2): Gaussian size
         - rotation (1): angle
         - color (3): RGB
         - opacity (1): alpha
         - importance (1): for top-k selection
+        - depth (1): for occlusion ordering
+
+    Pool types:
+        - 'max': MaxPool2d (default) - preserves strong features/edges
+        - 'avg': AvgPool2d - smoother, reduces noise
+        - 'attn': AttentionPool2d - learned adaptive pooling
+        - 'strided': Strided convolution - learnable downsampling
     """
 
     def __init__(
@@ -85,15 +132,17 @@ class GaussianSplitNet(nn.Module):
         in_channels: int = 3,
         base_channels: int = 64,
         num_levels: int = 4,  # Unused, kept for API compatibility
+        pool_type: str = "max",
     ):
         super().__init__()
         _ = num_levels
+        self.pool_type = pool_type
 
         # Encoder
         self.inc = DoubleConv(in_channels, base_channels)      # 3 -> 64
-        self.down1 = Down(base_channels, base_channels * 2)    # 64 -> 128
-        self.down2 = Down(base_channels * 2, base_channels * 4)  # 128 -> 256
-        self.down3 = Down(base_channels * 4, base_channels * 8)  # 256 -> 512
+        self.down1 = Down(base_channels, base_channels * 2, pool_type)    # 64 -> 128
+        self.down2 = Down(base_channels * 2, base_channels * 4, pool_type)  # 128 -> 256
+        self.down3 = Down(base_channels * 4, base_channels * 8, pool_type)  # 256 -> 512
 
         # Decoder
         self.up1 = Up(base_channels * 8 + base_channels * 4, base_channels * 4)  # 512+256 -> 256
@@ -131,4 +180,4 @@ class GaussianSplitNet(nn.Module):
         return H * W
 
     def get_gaussian_info(self, H: int, W: int) -> str:
-        return f"GaussianSplitNet: {H}x{W} = {H*W:,} Gaussians"
+        return f"GaussianSplitNet (pool={self.pool_type}): {H}x{W} = {H*W:,} Gaussians"

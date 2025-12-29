@@ -88,6 +88,8 @@ def parse_args():
                         help='Model architecture: unet (UNet decoder) or split (Gaussian split decoder)')
     parser.add_argument('--base_channels', type=int, default=64,
                         help='Base number of channels')
+    parser.add_argument('--pool_type', type=str, default='max',
+                        help='Pooling type: max, avg, attn, strided')
     parser.add_argument('--num_levels', type=int, default=5,
                         help='Number of pyramid levels')
     parser.add_argument('--start_level', type=int, default=0,
@@ -205,6 +207,7 @@ def parse_args():
     print(f"batch_size: {args.batch_size}")
     print(f"model_type: {args.model_type}")
     print(f"num_levels: {args.num_levels}")
+    print(f"pool_type: {args.pool_type}")
     if args.model_type == 'unet':
         print(f"start_level: {args.start_level}")
     print(f"use_topk: {args.use_topk}")
@@ -891,6 +894,7 @@ def main():
             in_channels=3,
             base_channels=args.base_channels,
             num_levels=args.num_levels,
+            pool_type=args.pool_type,
         ).to(device)
     else:  # 'unet'
         model = MultiScaleGaussianUNet(
