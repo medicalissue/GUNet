@@ -20,9 +20,14 @@ num_workers: 4
 l1_weight: 0.8
 ssim_weight: 0.2
 lpips_weight: 0.1        # Weight for LPIPS perceptual loss (0 to disable)
-count_weight: 0.00001     # Weight for Gaussian count loss (0 to disable)
+count_weight: 0.00000     # Weight for Gaussian count loss (0 to disable)
 target_count: 1024       # Target number of effective Gaussians (null to penalize all)
-scale_weight: 0.0       # Weight for scale loss - penalizes small scales (0 to disable)
+scale_weight: 0.0        # Weight for scale loss - penalizes small scales (0 to disable)
+sparsity_weight: 0.0     # Weight for sparsity loss - encourages binary opacity (0 to disable)
+
+# Top-k selection
+use_topk: false           # Use top-k opacity selection (STE: forward=top-k only, backward=all)
+topk_count: 1024         # Number of Gaussians to render (top-k by opacity)
 
 # Checkpointing
 save_dir: ./checkpoints

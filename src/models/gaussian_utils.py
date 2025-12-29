@@ -180,3 +180,51 @@ def compute_total_gaussians(H: int, W: int, num_levels: int) -> int:
         w = W // (2 ** l)
         total += h * w
     return total
+
+
+def apply_topk_opacity(
+    gaussians: Dict[str, torch.Tensor],
+    k: int,
+) -> Dict[str, torch.Tensor]:
+    """
+    Apply top-k selection based on opacity with Straight-Through Estimator.
+
+    Only the top-k Gaussians by opacity will contribute to rendering (forward),
+    but gradients flow through all Gaussians (backward) via STE.
+
+    Args:
+        gaussians: Dictionary with Gaussian parameters (B, N, C)
+        k: Number of top Gaussians to keep
+
+    Returns:
+        Dictionary with masked opacities (top-k only in forward, all in backward)
+    """
+    opacities = gaussians['opacities']  # (B, N, 1)
+    B, N, _ = opacities.shape
+
+    # Clamp k to valid range
+    k = min(k, N)
+
+    # Get top-k indices based on opacity
+    opacity_flat = opacities.squeeze(-1)  # (B, N)
+    _, topk_indices = torch.topk(opacity_flat, k, dim=1)  # (B, k)
+
+    # Create binary mask for top-k
+    mask = torch.zeros_like(opacity_flat)  # (B, N)
+    mask.scatter_(1, topk_indices, 1.0)
+    mask = mask.unsqueeze(-1)  # (B, N, 1)
+
+    # STE: forward uses masked opacity, backward passes gradient through all
+    # output = soft + (hard - soft).detach()
+    # Forward: soft + (hard - soft) = hard = opacities * mask
+    # Backward: d(soft)/d(params) = d(opacities)/d(params)
+    masked_opacities = opacities + (opacities * mask - opacities).detach()
+
+    # Return new gaussians dict with masked opacities
+    return {
+        'means': gaussians['means'],
+        'scales': gaussians['scales'],
+        'rotations': gaussians['rotations'],
+        'colors': gaussians['colors'],
+        'opacities': masked_opacities,
+    }

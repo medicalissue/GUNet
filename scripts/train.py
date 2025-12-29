@@ -25,6 +25,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.models import MultiScaleGaussianUNet
+from src.models.gaussian_utils import apply_topk_opacity
 from src.rendering import render_gaussians_2d
 from src.losses import ReconstructionLoss
 from src.data import ImageDataset
@@ -102,6 +103,14 @@ def parse_args():
                         help='Target number of effective Gaussians')
     parser.add_argument('--scale_weight', type=float, default=0.0,
                         help='Scale loss weight - penalizes small scales (0 to disable)')
+    parser.add_argument('--sparsity_weight', type=float, default=0.0,
+                        help='Sparsity loss weight - encourages binary opacity (0 to disable)')
+
+    # Top-k selection
+    parser.add_argument('--use_topk', action='store_true',
+                        help='Use top-k opacity selection for rendering')
+    parser.add_argument('--topk_count', type=int, default=1024,
+                        help='Number of top-k Gaussians to render')
 
     # Checkpointing
     parser.add_argument('--save_dir', type=str, default='./checkpoints',
@@ -145,8 +154,16 @@ def parse_args():
     args.lpips_weight = float(args.lpips_weight)
     args.count_weight = float(args.count_weight)
     args.scale_weight = float(args.scale_weight)
+    args.sparsity_weight = float(args.sparsity_weight)
     if args.target_count is not None:
         args.target_count = int(args.target_count)
+
+    # Handle use_topk from config (can be True/False in yaml)
+    if hasattr(args, 'use_topk') and args.use_topk is not None:
+        args.use_topk = bool(args.use_topk)
+    else:
+        args.use_topk = False
+    args.topk_count = int(args.topk_count)
 
     # Print loaded config
     print(f"=== Config ===")
@@ -155,6 +172,9 @@ def parse_args():
     print(f"batch_size: {args.batch_size}")
     print(f"num_levels: {args.num_levels}")
     print(f"start_level: {args.start_level}")
+    print(f"use_topk: {args.use_topk}")
+    if args.use_topk:
+        print(f"topk_count: {args.topk_count}")
     print(f"vis_every: {args.vis_every}")
     print(f"==============")
 
@@ -386,6 +406,8 @@ def train_one_epoch(
     epoch: int,
     vis_dir: Path,
     vis_every: int = 100,
+    use_topk: bool = False,
+    topk_count: int = 1024,
 ) -> dict:
     """Train for one epoch with visualization."""
     model.train()
@@ -410,6 +432,10 @@ def train_one_epoch(
 
         output = model(images)
         gaussians = output['gaussians']
+
+        # Apply top-k selection if enabled
+        if use_topk:
+            gaussians = apply_topk_opacity(gaussians, topk_count)
 
         # Render Gaussians
         rendered = render_gaussians_2d(gaussians, H, W)
@@ -622,6 +648,7 @@ def main():
         count_weight=args.count_weight,
         target_count=args.target_count,
         scale_weight=args.scale_weight,
+        sparsity_weight=args.sparsity_weight,
     )
     if args.lpips_weight > 0:
         print(f'LPIPS loss enabled: weight={args.lpips_weight}')
@@ -629,6 +656,10 @@ def main():
         print(f'Count loss enabled: weight={args.count_weight}, target={args.target_count}')
     if args.scale_weight > 0:
         print(f'Scale loss enabled: weight={args.scale_weight}')
+    if args.sparsity_weight > 0:
+        print(f'Sparsity loss enabled: weight={args.sparsity_weight}')
+    if args.use_topk:
+        print(f'Top-k selection enabled: k={args.topk_count}')
 
     # Optimizer
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
@@ -651,7 +682,8 @@ def main():
         # Train
         train_metrics = train_one_epoch(
             model, dataloader, criterion, optimizer, device, epoch,
-            vis_dir=vis_dir, vis_every=args.vis_every
+            vis_dir=vis_dir, vis_every=args.vis_every,
+            use_topk=args.use_topk, topk_count=args.topk_count
         )
 
         # Update scheduler

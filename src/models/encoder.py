@@ -72,11 +72,22 @@ class UpBlock(nn.Module):
 
 
 class GaussianHead(nn.Module):
-    """Output head for Gaussian parameters (9 channels)."""
+    """
+    Output head for Gaussian parameters (9 channels).
+
+    Uses a deeper network with 3x3 conv for better spatial context,
+    followed by 1x1 conv for final parameter prediction.
+    """
 
     def __init__(self, in_channels: int):
         super().__init__()
-        self.conv = nn.Conv2d(in_channels, 9, kernel_size=1)
+        hidden_channels = max(in_channels // 2, 32)
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, hidden_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(hidden_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_channels, 9, kernel_size=1),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.conv(x)

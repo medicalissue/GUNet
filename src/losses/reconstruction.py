@@ -93,12 +93,14 @@ def ssim_loss_pytorch(
 
 class ReconstructionLoss(nn.Module):
     """
-    Combined reconstruction loss with L1, SSIM, LPIPS, count, and scale components.
+    Combined reconstruction loss with L1, SSIM, LPIPS, count, scale, and sparsity components.
 
-    Loss = λ_l1 * L1 + λ_ssim * (1 - SSIM) + λ_lpips * LPIPS + λ_count * CountLoss + λ_scale * ScaleLoss
+    Loss = λ_l1 * L1 + λ_ssim * (1 - SSIM) + λ_lpips * LPIPS + λ_count * CountLoss
+           + λ_scale * ScaleLoss + λ_sparsity * SparsityLoss
 
     Count loss penalizes the effective number of Gaussians (sum of opacities).
     Scale loss penalizes small Gaussians - smaller scale = larger penalty.
+    Sparsity loss encourages binary opacity (0 or 1) to prevent "cheating".
 
     Args:
         l1_weight: Weight for L1 loss (default: 0.8)
@@ -107,6 +109,7 @@ class ReconstructionLoss(nn.Module):
         count_weight: Weight for count loss (default: 0.0, disabled)
         target_count: Target number of effective Gaussians (default: None, penalize all)
         scale_weight: Weight for scale loss (default: 0.0, disabled)
+        sparsity_weight: Weight for sparsity loss (default: 0.0, disabled)
         use_pytorch_msssim: Use pytorch_msssim library if available
     """
 
@@ -118,6 +121,7 @@ class ReconstructionLoss(nn.Module):
         count_weight: float = 0.0,
         target_count: Optional[int] = None,
         scale_weight: float = 0.0,
+        sparsity_weight: float = 0.0,
         use_pytorch_msssim: bool = True,
     ):
         super().__init__()
@@ -127,6 +131,7 @@ class ReconstructionLoss(nn.Module):
         self.count_weight = count_weight
         self.target_count = target_count
         self.scale_weight = scale_weight
+        self.sparsity_weight = sparsity_weight
         self.use_pytorch_msssim = use_pytorch_msssim and PYTORCH_MSSSIM_AVAILABLE
 
         if use_pytorch_msssim and not PYTORCH_MSSSIM_AVAILABLE:
@@ -230,6 +235,16 @@ class ReconstructionLoss(nn.Module):
 
             total_loss = total_loss + self.scale_weight * scale_loss
 
+        # Sparsity loss (if enabled) - encourage binary opacity (0 or 1)
+        sparsity_loss = torch.tensor(0.0, device=pred.device)
+
+        if self.sparsity_weight > 0 and gaussians is not None:
+            opacities = gaussians['opacities']  # (B, N, 1)
+            # min(opacity, 1-opacity) is maximized at 0.5, minimized at 0 or 1
+            # This encourages opacity to be either 0 or 1, not in between
+            sparsity_loss = torch.min(opacities, 1 - opacities).mean()
+            total_loss = total_loss + self.sparsity_weight * sparsity_loss
+
         return {
             'total': total_loss,
             'l1': l1_loss,
@@ -237,6 +252,7 @@ class ReconstructionLoss(nn.Module):
             'lpips': lpips_loss,
             'count': count_loss,
             'scale': scale_loss,
+            'sparsity': sparsity_loss,
             'n_effective': n_effective,
             'avg_scale': avg_scale,
         }
