@@ -12,7 +12,7 @@ start_level: 0       # Start Gaussian output from this level (only for unet)
                      # start_level=1 means: 128x128, 64x64, 32x32, 16x16 (skip 256x256)
 
 # Training
-batch_size: 1
+batch_size: 64
 lr: 1e-4
 epochs: 100
 num_workers: 4
@@ -28,7 +28,7 @@ sparsity_weight: 0.0     # Weight for sparsity loss - encourages binary opacity 
 
 # Top-k selection
 use_topk: true           # Use top-k importance selection (STE: forward=hard, backward=soft)
-topk_count: 1024         # Number of Gaussians to render (top-k by importance)
+topk_count: 4096         # Number of Gaussians to render (top-k by importance)
 topk_temperature: 1.0    # Soft gate sharpness (>1: sharper, <1: softer)
 
 # Mixed precision
@@ -40,7 +40,7 @@ save_every: 10
 
 # Visualization
 vis_dir: ./visualizations
-vis_every: 1000  # Visualize every N batches
+vis_every: 50  # Visualize every N batches
 
 # Device
 device: cuda
