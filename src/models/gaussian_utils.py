@@ -3,7 +3,7 @@ Gaussian utilities for Multi-Scale Gaussian UNet.
 
 Each Gaussian has 9 parameters:
 - delta_mu: (2) offset from pixel center, in range [-0.5, 0.5]
-- scale: (2) Gaussian scale (in log space from network, exp() applied)
+- scale: (2) Gaussian scale (softplus applied for stability)
 - rotation: (1) rotation angle in radians
 - color: (3) RGB color
 - opacity: (1) opacity value (sigmoid applied to get [0,1])
@@ -11,6 +11,7 @@ Each Gaussian has 9 parameters:
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import List, Tuple, Dict
 
 
@@ -51,14 +52,15 @@ def parse_gaussian_params(raw_params: torch.Tensor) -> Dict[str, torch.Tensor]:
 
     # Parse each parameter
     delta_mu = torch.tanh(params[..., 0:2]) * 0.5  # [-0.5, 0.5]
-    scale = torch.exp(params[..., 2:4])  # positive, log-space output
+    scale = F.softplus(params[..., 2:4])  # positive, no explosion (unlike exp)
     rotation = params[..., 4:5]  # radians, unbounded
 
     # Color: STE (Straight-Through Estimator)
     # Forward: clamp to [0,1], Backward: gradient passes through unchanged
     color_raw = params[..., 5:8]
-    color = color_raw + (color_raw.clamp(0, 1) - color_raw).detach()
-
+    # color = color_raw + (color_raw.clamp(0, 1) - color_raw).detach()
+    color = torch.sigmoid(color_raw)
+    
     # Opacity: sigmoid for smooth [0,1] mapping
     opacity = torch.sigmoid(params[..., 8:9])
 
