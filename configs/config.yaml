@@ -27,8 +27,9 @@ scale_weight: 0.0        # Weight for scale loss - penalizes small scales (0 to 
 sparsity_weight: 0.0     # Weight for sparsity loss - encourages binary opacity (0 to disable)
 
 # Top-k selection
-use_topk: true           # Use top-k opacity selection (STE: forward=top-k only, backward=all)
-topk_count: 1024         # Number of Gaussians to render (top-k by opacity)
+use_topk: true           # Use top-k importance selection (STE: forward=hard, backward=soft)
+topk_count: 1024         # Number of Gaussians to render (top-k by importance)
+topk_temperature: 1.0    # Soft gate sharpness (>1: sharper, <1: softer)
 
 # Mixed precision
 use_amp: true            # Use automatic mixed precision (AMP) for faster training

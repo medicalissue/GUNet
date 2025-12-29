@@ -136,6 +136,7 @@ def parse_gaussian_params_10ch(raw_params: torch.Tensor) -> Dict[str, torch.Tens
 def apply_topk_importance(
     gaussians: Dict[str, torch.Tensor],
     k: int,
+    temperature: float = 1.0,
 ) -> Dict[str, torch.Tensor]:
     """
     Apply top-k selection based on IMPORTANCE with STE for gradient flow.
@@ -146,6 +147,7 @@ def apply_topk_importance(
     Args:
         gaussians: Dictionary with Gaussian parameters (B, N, C)
         k: Number of top Gaussians to keep
+        temperature: Sharpness of soft gate (higher = sharper gradient)
 
     Returns:
         Dictionary with masked opacities
@@ -164,8 +166,9 @@ def apply_topk_importance(
     hard_mask = hard_mask.unsqueeze(-1)  # (B, N, 1)
 
     # Soft gate from importance (differentiable)
-    # importance is already in [0, 1] from sigmoid
-    soft_gate = importance  # (B, N, 1)
+    # temperature > 1: sharper (importance^temp approaches 0 or 1)
+    # temperature < 1: softer
+    soft_gate = importance ** temperature  # (B, N, 1)
 
     # STE: forward=hard, backward=soft
     # mask = hard + (soft - soft.detach())
