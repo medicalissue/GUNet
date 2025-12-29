@@ -119,9 +119,11 @@ def parse_args():
 
     # Top-k selection
     parser.add_argument('--use_topk', action='store_true',
-                        help='Use top-k opacity selection for rendering')
+                        help='Use top-k importance selection for rendering')
     parser.add_argument('--topk_count', type=int, default=1024,
                         help='Number of top-k Gaussians to render')
+    parser.add_argument('--topk_temperature', type=float, default=1.0,
+                        help='Soft gate sharpness for STE (>1: sharper, <1: softer)')
 
     # Mixed precision
     parser.add_argument('--use_amp', action='store_true',
@@ -179,6 +181,10 @@ def parse_args():
     else:
         args.use_topk = False
     args.topk_count = int(args.topk_count)
+    if hasattr(args, 'topk_temperature'):
+        args.topk_temperature = float(args.topk_temperature)
+    else:
+        args.topk_temperature = 1.0
 
     # Handle use_amp from config
     if hasattr(args, 'use_amp') and args.use_amp is not None:
@@ -198,6 +204,7 @@ def parse_args():
     print(f"use_topk: {args.use_topk}")
     if args.use_topk:
         print(f"topk_count: {args.topk_count}")
+        print(f"topk_temperature: {args.topk_temperature}")
     print(f"use_amp: {args.use_amp}")
     print(f"vis_every: {args.vis_every}")
     print(f"==============")
@@ -534,6 +541,7 @@ def train_one_epoch(
     vis_every: int = 100,
     use_topk: bool = False,
     topk_count: int = 1024,
+    topk_temperature: float = 1.0,
     use_amp: bool = False,
     scaler: GradScaler = None,
 ) -> dict:
@@ -567,7 +575,7 @@ def train_one_epoch(
             if use_topk:
                 # Use importance-based selection if available (GaussianSplitNet)
                 if 'importance' in gaussians:
-                    gaussians = apply_topk_importance(gaussians, topk_count)
+                    gaussians = apply_topk_importance(gaussians, topk_count, topk_temperature)
                 else:
                     gaussians = apply_topk_opacity(gaussians, topk_count)
 
@@ -837,6 +845,7 @@ def main():
             model, dataloader, criterion, optimizer, device, epoch,
             vis_dir=vis_dir, vis_every=args.vis_every,
             use_topk=args.use_topk, topk_count=args.topk_count,
+            topk_temperature=args.topk_temperature,
             use_amp=args.use_amp, scaler=scaler,
         )
 
