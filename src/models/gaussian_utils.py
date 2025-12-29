@@ -133,6 +133,63 @@ def parse_gaussian_params_10ch(raw_params: torch.Tensor) -> Dict[str, torch.Tens
     }
 
 
+def parse_gaussian_params_11ch(raw_params: torch.Tensor) -> Dict[str, torch.Tensor]:
+    """
+    Parse raw 11-channel output into Gaussian parameters with depth.
+
+    11 channels = 9 Gaussian params + 1 importance + 1 depth.
+
+    Args:
+        raw_params: (B, 11, H, W) raw network output
+
+    Returns:
+        Dictionary with parsed parameters:
+        - means: (B, N, 2) absolute positions in image coordinates
+        - scales: (B, N, 2) positive scale values
+        - rotations: (B, N, 1) rotation angle in radians
+        - colors: (B, N, 3) RGB in [0, 1]
+        - opacities: (B, N, 1) opacity in [0, 1]
+        - importance: (B, N, 1) importance score in [0, 1]
+        - depths: (B, N, 1) depth values (positive, for front-to-back ordering)
+    """
+    B, C, H, W = raw_params.shape
+    assert C == 11, f"Expected 11 channels, got {C}"
+    device = raw_params.device
+
+    # Rearrange to (B, H, W, 11)
+    params = raw_params.permute(0, 2, 3, 1)
+
+    # Parse each parameter
+    delta_mu = torch.tanh(params[..., 0:2]) * 0.5  # [-0.5, 0.5]
+    scale = F.softplus(params[..., 2:4]) + 1.0  # minimum scale of 1.0
+    rotation = params[..., 4:5]  # radians, unbounded
+    color = torch.sigmoid(params[..., 5:8])  # [0, 1]
+    opacity = torch.sigmoid(params[..., 8:9])  # [0, 1]
+    importance = torch.sigmoid(params[..., 9:10])  # [0, 1]
+    # Depth: softplus ensures positive, +0.1 to avoid z=0
+    depth = F.softplus(params[..., 10:11]) + 0.1  # positive depth
+
+    # Create pixel coordinate grid
+    coords = create_pixel_coords(H, W, device)  # (H, W, 2)
+
+    # Compute absolute mean positions
+    # means = pixel_coord + delta_mu
+    means = coords.unsqueeze(0) + delta_mu  # (B, H, W, 2)
+
+    # Flatten spatial dimensions: (B, H, W, C) -> (B, N, C)
+    N = H * W
+
+    return {
+        'means': means.reshape(B, N, 2),
+        'scales': scale.reshape(B, N, 2),
+        'rotations': rotation.reshape(B, N, 1),
+        'colors': color.reshape(B, N, 3),
+        'opacities': opacity.reshape(B, N, 1),
+        'importance': importance.reshape(B, N, 1),
+        'depths': depth.reshape(B, N, 1),
+    }
+
+
 def apply_topk_importance(
     gaussians: Dict[str, torch.Tensor],
     k: int,
@@ -179,7 +236,7 @@ def apply_topk_importance(
     # Apply mask to opacities
     masked_opacities = opacities * mask
 
-    return {
+    result = {
         'means': gaussians['means'],
         'scales': gaussians['scales'],
         'rotations': gaussians['rotations'],
@@ -187,6 +244,12 @@ def apply_topk_importance(
         'opacities': masked_opacities,
         'importance': gaussians['importance'],
     }
+
+    # Pass through depths if present
+    if 'depths' in gaussians:
+        result['depths'] = gaussians['depths']
+
+    return result
 
 
 def upsample_gaussians(

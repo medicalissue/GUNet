@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict
 
-from .gaussian_utils import parse_gaussian_params_10ch
+from .gaussian_utils import parse_gaussian_params_11ch
 
 
 class DoubleConv(nn.Module):
@@ -100,8 +100,8 @@ class GaussianSplitNet(nn.Module):
         self.up2 = Up(base_channels * 4 + base_channels * 2, base_channels * 2)  # 256+128 -> 128
         self.up3 = Up(base_channels * 2 + base_channels, base_channels)          # 128+64 -> 64
 
-        # Output head: 64 -> 10
-        self.outc = nn.Conv2d(base_channels, 10, kernel_size=1)
+        # Output head: 64 -> 11 (with depth)
+        self.outc = nn.Conv2d(base_channels, 11, kernel_size=1)
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         # Encoder
@@ -116,10 +116,10 @@ class GaussianSplitNet(nn.Module):
         x = self.up3(x, x1)   # (B, 64, H, W)
 
         # Output
-        out = self.outc(x)    # (B, 10, H, W)
+        out = self.outc(x)    # (B, 11, H, W)
 
-        # Parse to Gaussian parameters
-        gaussians = parse_gaussian_params_10ch(out)
+        # Parse to Gaussian parameters (with depth)
+        gaussians = parse_gaussian_params_11ch(out)
 
         return {
             'gaussians': gaussians,

@@ -445,7 +445,15 @@ def visualize_gaussians_detail(
     if has_importance:
         importance = gaussians['importance'][0].cpu().numpy().squeeze()
 
-    fig, axes = plt.subplots(3, 3, figsize=(15, 15))
+    # Check if depth is available
+    has_depth = 'depths' in gaussians and gaussians['depths'] is not None
+    if has_depth:
+        depths = gaussians['depths'][0].cpu().numpy().squeeze()
+
+    # Get rotation for ellipse drawing
+    rotations = gaussians['rotations'][0].cpu().numpy().squeeze()
+
+    fig, axes = plt.subplots(4, 3, figsize=(15, 20))
 
     # Row 0: Original, Rendered, Difference
     orig = images[0].cpu().permute(1, 2, 0).numpy()
@@ -487,12 +495,19 @@ def visualize_gaussians_detail(
     axes[1, 1].axis('off')
     plt.colorbar(im, ax=axes[1, 1], fraction=0.046)
 
-    # Opacity map (reshape to HxW)
-    opacity_map = opacities.reshape(H, W)
-    im = axes[1, 2].imshow(opacity_map, cmap='gray', vmin=0, vmax=1)
-    axes[1, 2].set_title(f'Opacity Map\nmean={opacities.mean():.3f}')
-    axes[1, 2].axis('off')
-    plt.colorbar(im, ax=axes[1, 2], fraction=0.046)
+    # Depth map (if available) or Opacity map
+    if has_depth:
+        depth_map = depths.reshape(H, W)
+        im = axes[1, 2].imshow(depth_map, cmap='plasma')
+        axes[1, 2].set_title(f'Depth Map\nmean={depths.mean():.2f}, range=[{depths.min():.2f}, {depths.max():.2f}]')
+        axes[1, 2].axis('off')
+        plt.colorbar(im, ax=axes[1, 2], fraction=0.046)
+    else:
+        opacity_map = opacities.reshape(H, W)
+        im = axes[1, 2].imshow(opacity_map, cmap='gray', vmin=0, vmax=1)
+        axes[1, 2].set_title(f'Opacity Map\nmean={opacities.mean():.3f}')
+        axes[1, 2].axis('off')
+        plt.colorbar(im, ax=axes[1, 2], fraction=0.046)
 
     # Row 2: Histograms - Scale distribution, Opacity distribution, Importance distribution
     # Scale histogram (2D: scale_x vs scale_y)
@@ -510,8 +525,13 @@ def visualize_gaussians_detail(
     axes[2, 1].set_title(f'Opacity Distribution\n{n_active}/{len(opacities)} active (>{0.5})')
     axes[2, 1].legend()
 
-    # Importance histogram (if available) or Color distribution
-    if has_importance:
+    # Importance/Depth histogram
+    if has_depth:
+        # Show depth distribution
+        axes[2, 2].hist(depths, bins=50, alpha=0.7, color='purple')
+        axes[2, 2].set_xlabel('Depth')
+        axes[2, 2].set_title(f'Depth Distribution\nmean={depths.mean():.2f}, std={depths.std():.2f}')
+    elif has_importance:
         axes[2, 2].hist(importance, bins=50, alpha=0.7, color='orange')
         axes[2, 2].axvline(x=0.5, color='r', linestyle='--', label='threshold=0.5')
         n_important = (importance > 0.5).sum()
@@ -524,6 +544,89 @@ def visualize_gaussians_detail(
             axes[2, 2].hist(colors[:, ch], bins=50, alpha=0.5, label=name)
         axes[2, 2].legend()
         axes[2, 2].set_title('Color Distribution')
+
+    # Row 3: Gaussian ellipse boundaries
+    # Select top-k Gaussians for visualization (avoid clutter)
+    n_ellipses = min(512, len(means))
+    if has_importance:
+        top_indices = np.argsort(importance)[-n_ellipses:]
+    else:
+        top_indices = np.argsort(opacities)[-n_ellipses:]
+
+    # Helper function to draw ellipses
+    def draw_ellipses(ax, indices, alpha=0.5, color_by='depth'):
+        ellipses = []
+        ellipse_colors = []
+        for idx in indices:
+            cx, cy = means[idx]
+            sx, sy = scales[idx]
+            angle_deg = np.degrees(rotations[idx])
+            # Ellipse width/height = 2 * scale (1-sigma boundary)
+            ellipse = Ellipse(
+                xy=(cx, cy),
+                width=2 * sx,
+                height=2 * sy,
+                angle=angle_deg,
+            )
+            ellipses.append(ellipse)
+            # Color by depth (if available), importance, or opacity
+            if color_by == 'depth' and has_depth:
+                # Normalize depth for colormap
+                d_min, d_max = depths.min(), depths.max()
+                ellipse_colors.append((depths[idx] - d_min) / (d_max - d_min + 1e-6))
+            elif color_by == 'importance' and has_importance:
+                ellipse_colors.append(importance[idx])
+            else:
+                ellipse_colors.append(opacities[idx])
+
+        # Use plasma for depth, hot for importance/opacity
+        cmap = plt.cm.plasma if (color_by == 'depth' and has_depth) else plt.cm.hot
+        collection = PatchCollection(
+            ellipses,
+            facecolor='none',
+            edgecolor=cmap(ellipse_colors),
+            linewidth=0.5,
+            alpha=alpha,
+        )
+        ax.add_collection(collection)
+
+    # Row 3, Col 0: Rendered + all top-k ellipses
+    axes[3, 0].imshow(recon.clip(0, 1))
+    draw_ellipses(axes[3, 0], top_indices, alpha=0.7)
+    axes[3, 0].set_xlim(0, W)
+    axes[3, 0].set_ylim(H, 0)
+    axes[3, 0].set_title(f'Rendered + Top-{n_ellipses} Ellipses')
+    axes[3, 0].axis('off')
+
+    # Row 3, Col 1: Original + all top-k ellipses
+    axes[3, 1].imshow(orig.clip(0, 1))
+    draw_ellipses(axes[3, 1], top_indices, alpha=0.7)
+    axes[3, 1].set_xlim(0, W)
+    axes[3, 1].set_ylim(H, 0)
+    axes[3, 1].set_title(f'Original + Top-{n_ellipses} Ellipses')
+    axes[3, 1].axis('off')
+
+    # Row 3, Col 2: Zoomed view of center region
+    zoom_size = H // 4
+    cx, cy = W // 2, H // 2
+    x1, x2 = cx - zoom_size, cx + zoom_size
+    y1, y2 = cy - zoom_size, cy + zoom_size
+
+    # Filter ellipses in zoom region
+    in_region = (means[:, 0] >= x1) & (means[:, 0] <= x2) & \
+                (means[:, 1] >= y1) & (means[:, 1] <= y2)
+    region_indices = np.where(in_region)[0]
+    if has_importance:
+        region_indices = region_indices[np.argsort(importance[region_indices])[-min(256, len(region_indices)):]]
+    else:
+        region_indices = region_indices[np.argsort(opacities[region_indices])[-min(256, len(region_indices)):]]
+
+    axes[3, 2].imshow(recon[y1:y2, x1:x2].clip(0, 1), extent=[x1, x2, y2, y1])
+    draw_ellipses(axes[3, 2], region_indices, alpha=0.8)
+    axes[3, 2].set_xlim(x1, x2)
+    axes[3, 2].set_ylim(y2, y1)
+    axes[3, 2].set_title(f'Zoomed Center ({len(region_indices)} ellipses)')
+    axes[3, 2].axis('off')
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')

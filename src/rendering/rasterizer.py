@@ -1,7 +1,8 @@
 """
 2D Gaussian Rasterizer using gsplat.
 
-2D Gaussians are rendered as 3D Gaussians on z=1 plane with orthographic projection.
+2D Gaussians are rendered as 3D Gaussians with depth-aware ordering.
+Supports learned depth for proper occlusion (front Gaussians block back ones).
 """
 
 import torch
@@ -18,7 +19,7 @@ def render_gaussians_2d(
     background: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
-    Render 2D Gaussians using gsplat.
+    Render 2D Gaussians using gsplat with depth-aware ordering.
 
     Args:
         gaussians: Dictionary with:
@@ -27,6 +28,7 @@ def render_gaussians_2d(
             - rotations: (B, N, 1) rotation angles (radians)
             - colors: (B, N, 3) RGB [0,1]
             - opacities: (B, N, 1) opacity [0,1]
+            - depths: (B, N, 1) optional depth values (if not present, all z=1)
         H, W: Output dimensions
         background: Optional background color
 
@@ -43,8 +45,13 @@ def render_gaussians_2d(
     device = means.device
     dtype = means.dtype
 
-    # 2D -> 3D: place on z=1 plane
-    means_3d = torch.cat([means, torch.ones(B, N, 1, device=device, dtype=dtype)], dim=-1)
+    # 2D -> 3D: use learned depth if available, else z=1
+    if 'depths' in gaussians:
+        depths = gaussians['depths']  # (B, N, 1)
+        means_3d = torch.cat([means, depths], dim=-1)
+    else:
+        means_3d = torch.cat([means, torch.ones(B, N, 1, device=device, dtype=dtype)], dim=-1)
+
     scales_3d = torch.cat([scales, torch.full((B, N, 1), 0.001, device=device, dtype=dtype)], dim=-1)
 
     # Rotation angle -> quaternion (z-axis rotation)
