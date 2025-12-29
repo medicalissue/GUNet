@@ -27,9 +27,12 @@ scale_weight: 0.0        # Weight for scale loss - penalizes small scales (0 to 
 sparsity_weight: 0.0     # Weight for sparsity loss - encourages binary opacity (0 to disable)
 
 # Top-k selection
-use_topk: true           # Use top-k importance selection (STE: forward=hard, backward=soft)
+use_topk: false           # Use top-k importance selection (STE: forward=hard, backward=soft)
 topk_count: 4096         # Number of Gaussians to render (top-k by importance)
 topk_temperature: 1.0    # Soft gate sharpness (>1: sharper, <1: softer)
+
+# Rendering
+camera_model: ortho      # 'pinhole' (perspective, depth affects size) or 'ortho' (orthographic, depth only for ordering)
 
 # Mixed precision
 use_amp: true            # Use automatic mixed precision (AMP) for faster training

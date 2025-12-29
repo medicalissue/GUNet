@@ -17,6 +17,7 @@ def render_gaussians_2d(
     H: int,
     W: int,
     background: Optional[torch.Tensor] = None,
+    camera_model: str = "ortho",
 ) -> torch.Tensor:
     """
     Render 2D Gaussians using gsplat with depth-aware ordering.
@@ -82,6 +83,7 @@ def render_gaussians_2d(
             height=H,
             near_plane=0.01,
             far_plane=100.0,
+            camera_model=camera_model,
         )
         images.append(render_colors.squeeze(0))
 

@@ -167,7 +167,7 @@ def parse_gaussian_params_11ch(raw_params: torch.Tensor) -> Dict[str, torch.Tens
     opacity = torch.sigmoid(params[..., 8:9])  # [0, 1]
     importance = torch.sigmoid(params[..., 9:10])  # [0, 1]
     # Depth: softplus ensures positive, +0.1 to avoid z=0
-    depth = F.softplus(params[..., 10:11]) + 0.1  # positive depth
+    depth = F.softplus(params[..., 10:11])  # positive depth
 
     # Create pixel coordinate grid
     coords = create_pixel_coords(H, W, device)  # (H, W, 2)

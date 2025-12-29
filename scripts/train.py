@@ -127,6 +127,10 @@ def parse_args():
     parser.add_argument('--topk_temperature', type=float, default=1.0,
                         help='Soft gate sharpness for STE (>1: sharper, <1: softer)')
 
+    # Rendering
+    parser.add_argument('--camera_model', type=str, default='ortho',
+                        help='Camera model: "pinhole" (perspective) or "ortho" (orthographic)')
+
     # Mixed precision
     parser.add_argument('--use_amp', action='store_true',
                         help='Use automatic mixed precision (AMP) for faster training')
@@ -208,6 +212,7 @@ def parse_args():
         print(f"topk_count: {args.topk_count}")
         print(f"topk_temperature: {args.topk_temperature}")
     print(f"use_amp: {args.use_amp}")
+    print(f"camera_model: {args.camera_model}")
     print(f"vis_every: {args.vis_every}")
     print(f"==============")
 
@@ -649,6 +654,7 @@ def train_one_epoch(
     topk_temperature: float = 1.0,
     use_amp: bool = False,
     scaler: GradScaler = None,
+    camera_model: str = "ortho",
 ) -> dict:
     """Train for one epoch with visualization."""
     model.train()
@@ -686,7 +692,7 @@ def train_one_epoch(
 
         # Render Gaussians OUTSIDE autocast (gsplat requires float32)
         gaussians_f32 = cast_gaussians_to_float32(gaussians)
-        rendered = render_gaussians_2d(gaussians_f32, H, W)
+        rendered = render_gaussians_2d(gaussians_f32, H, W, camera_model=camera_model)
 
         # Compute loss (pass gaussians for count loss)
         losses = criterion(rendered, images, gaussians_f32)
@@ -757,6 +763,7 @@ def validate(
     dataloader: DataLoader,
     criterion: nn.Module,
     device: torch.device,
+    camera_model: str = "ortho",
 ) -> dict:
     """Validate the model."""
     model.eval()
@@ -773,7 +780,7 @@ def validate(
         output = model(images)
         gaussians = output['gaussians']
         gaussians = cast_gaussians_to_float32(gaussians)
-        rendered = render_gaussians_2d(gaussians, H, W)
+        rendered = render_gaussians_2d(gaussians, H, W, camera_model=camera_model)
 
         losses = criterion(rendered, images)
 
@@ -952,6 +959,7 @@ def main():
             use_topk=args.use_topk, topk_count=args.topk_count,
             topk_temperature=args.topk_temperature,
             use_amp=args.use_amp, scaler=scaler,
+            camera_model=args.camera_model,
         )
 
         # Update scheduler
