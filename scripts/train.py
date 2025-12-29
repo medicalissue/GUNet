@@ -27,7 +27,7 @@ import numpy as np
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.models import MultiScaleGaussianUNet, GaussianSplitNet, make_identity_gaussians, apply_topk_torchsort
+from src.models import MultiScaleGaussianUNet, GaussianSplitNet, make_identity_gaussians, apply_topk_torchsort, apply_topk_soft
 from src.models.gaussian_utils import apply_topk_opacity, apply_topk_importance
 from src.rendering import render_gaussians_2d
 
@@ -137,9 +137,9 @@ def parse_args():
                         help='Number of top-k Gaussians to render')
     parser.add_argument('--topk_temperature', type=float, default=1.0,
                         help='Soft gate sharpness for STE (>1: sharper, <1: softer)')
-    parser.add_argument('--topk_method', type=str, default='ste',
-                        choices=['ste', 'torchsort'],
-                        help='Top-k method: ste (importance^temp) or torchsort (differentiable ranking)')
+    parser.add_argument('--topk_method', type=str, default='soft',
+                        choices=['ste', 'torchsort', 'soft'],
+                        help='Top-k method: ste (importance^temp), torchsort (differentiable ranking), soft (threshold-based)')
 
     # Rendering
     parser.add_argument('--camera_model', type=str, default='ortho',
@@ -768,6 +768,8 @@ def train_one_epoch(
                 if 'importance' in gaussians:
                     if topk_method == 'torchsort':
                         gaussians = apply_topk_torchsort(gaussians, topk_count, topk_temperature)
+                    elif topk_method == 'soft':
+                        gaussians = apply_topk_soft(gaussians, topk_count, topk_temperature)
                     else:  # 'ste'
                         gaussians = apply_topk_importance(gaussians, topk_count, topk_temperature)
                 else:

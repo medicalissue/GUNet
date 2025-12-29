@@ -252,6 +252,75 @@ def apply_topk_importance(
     return result
 
 
+def apply_topk_soft(
+    gaussians: Dict[str, torch.Tensor],
+    k: int,
+    temperature: float = 0.1,
+) -> Dict[str, torch.Tensor]:
+    """
+    Soft top-k selection using k-th value as threshold.
+
+    w_i = sigmoid((x_i - t_k) / τ)
+
+    where t_k is the k-th largest importance value.
+    - τ → 0: hard top-k (step function)
+    - τ > 0: soft top-k (smooth transition)
+
+    Advantages:
+    - O(N) complexity (kthvalue is O(N) average)
+    - Sparse: only elements near threshold get gradient
+    - Clean gradient flow through importance values
+
+    Args:
+        gaussians: Dictionary with Gaussian parameters (B, N, C)
+        k: Number of top Gaussians to keep
+        temperature: Softness (lower = sharper, 0.01~1.0 typical)
+
+    Returns:
+        Dictionary with masked opacities
+    """
+    importance = gaussians['importance']  # (B, N, 1)
+    opacities = gaussians['opacities']  # (B, N, 1)
+    B, N, _ = importance.shape
+
+    k = min(k, N)
+    importance_flat = importance.squeeze(-1)  # (B, N)
+
+    # Find k-th largest value as threshold
+    # kthvalue returns k-th smallest, so we use (N-k+1)-th for k-th largest
+    # Or use topk and take the last (k-th) value
+    topk_vals, _ = torch.topk(importance_flat, k, dim=1)  # (B, k)
+    threshold = topk_vals[:, -1:].detach()  # (B, 1) - k-th largest
+
+    # Soft mask: sigmoid((importance - threshold) / temperature)
+    soft_mask = torch.sigmoid((importance_flat - threshold) / temperature)  # (B, N)
+    soft_mask = soft_mask.unsqueeze(-1)  # (B, N, 1)
+
+    # Hard mask for forward pass
+    hard_mask = (importance_flat >= threshold).float().unsqueeze(-1)  # (B, N, 1)
+
+    # STE: forward=hard, backward=soft
+    mask = hard_mask + (soft_mask - soft_mask.detach())
+
+    # Apply mask to opacities
+    masked_opacities = opacities * mask
+
+    result = {
+        'means': gaussians['means'],
+        'scales': gaussians['scales'],
+        'rotations': gaussians['rotations'],
+        'colors': gaussians['colors'],
+        'opacities': masked_opacities,
+        'importance': gaussians['importance'],
+    }
+
+    # Pass through depths if present
+    if 'depths' in gaussians:
+        result['depths'] = gaussians['depths']
+
+    return result
+
+
 def apply_topk_torchsort(
     gaussians: Dict[str, torch.Tensor],
     k: int,

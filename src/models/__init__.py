@@ -5,6 +5,7 @@ from .gaussian_utils import (
     merge_multi_scale_gaussians,
     make_identity_gaussians,
     apply_topk_torchsort,
+    apply_topk_soft,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     'merge_multi_scale_gaussians',
     'make_identity_gaussians',
     'apply_topk_torchsort',
+    'apply_topk_soft',
 ]

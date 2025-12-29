@@ -17,7 +17,7 @@ num_gaussians: 1024  # Number of output Gaussians (only for cross_attn mode)
 use_identity_input: true  # Use 11ch identity Gaussians as input (residual learning)
 
 # Training
-batch_size: 64
+batch_size: 1
 lr: 1e-4
 epochs: 100
 num_workers: 4
@@ -32,10 +32,10 @@ scale_weight: 0.0        # Weight for scale loss - penalizes small scales (0 to 
 sparsity_weight: 0.0     # Weight for sparsity loss - encourages binary opacity (0 to disable)
 
 # Top-k selection
-use_topk: true           # Use top-k importance selection
-topk_method: torchsort   # 'ste' (importance^temp) or 'torchsort' (differentiable ranking)
-topk_count: 1024         # Number of Gaussians to render (top-k by importance)
-topk_temperature: 1.0    # For torchsort: regularization_strength (lower=harder). For STE: importance^temp
+use_topk: true            # Use top-k importance selection
+topk_method: soft         # 'ste', 'torchsort', or 'soft' (threshold-based, recommended)
+topk_count: 1024          # Number of Gaussians to render (top-k by importance)
+topk_temperature: 0.1     # For soft: sigmoid sharpness (0.01~1.0). For STE: importance^temp
 
 # Rendering
 camera_model: ortho      # 'pinhole' (perspective, depth affects size) or 'ortho' (orthographic, depth only for ordering)
@@ -49,7 +49,7 @@ save_every: 10
 
 # Visualization
 vis_dir: ./visualizations
-vis_every: 50  # Visualize every N batches
+vis_every: 1000  # Visualize every N batches
 
 # Device
 device: cuda

@@ -1,9 +1,11 @@
 torch>=2.0.0
 torchvision>=0.15.0
+numpy
 pillow>=9.0.0
 pyyaml>=6.0
 tqdm>=4.65.0
 pytorch-msssim>=1.0.0
 lpips>=0.1.4
 matplotlib>=3.5.0
-# gsplat>=0.1.0  # Optional: uncomment for CUDA-accelerated rendering
+torchsort  # Differentiable sorting for top-k selection
+gsplat  # CUDA-accelerated Gaussian splatting rendering
