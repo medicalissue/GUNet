@@ -20,15 +20,17 @@ from .gaussian_utils import parse_gaussian_params, upsample_gaussians, merge_mul
 
 
 class ConvBlock(nn.Module):
-    """Double convolution block with BatchNorm and ReLU."""
+    """Double convolution block with ReflectionPad, BatchNorm and ReLU."""
 
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
         self.conv = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, 3, padding=1, bias=False),
+            nn.ReflectionPad2d(1),
+            nn.Conv2d(in_channels, out_channels, 3, padding=0, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False),
+            nn.ReflectionPad2d(1),
+            nn.Conv2d(out_channels, out_channels, 3, padding=0, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
         )
@@ -83,7 +85,8 @@ class GaussianHead(nn.Module):
         super().__init__()
         hidden_channels = max(in_channels // 2, 32)
         self.conv = nn.Sequential(
-            nn.Conv2d(in_channels, hidden_channels, kernel_size=3, padding=1, bias=False),
+            nn.ReflectionPad2d(1),
+            nn.Conv2d(in_channels, hidden_channels, kernel_size=3, padding=0, bias=False),
             nn.BatchNorm2d(hidden_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(hidden_channels, 9, kernel_size=1),

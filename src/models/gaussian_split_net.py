@@ -14,14 +14,16 @@ from .gaussian_utils import parse_gaussian_params_10ch
 
 
 class DoubleConv(nn.Module):
-    """(Conv -> BN -> ReLU) x 2"""
+    """(ReflectionPad -> Conv -> BN -> ReLU) x 2"""
     def __init__(self, in_ch, out_ch):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, 3, padding=1, bias=False),
+            nn.ReflectionPad2d(1),
+            nn.Conv2d(in_ch, out_ch, 3, padding=0, bias=False),
             nn.BatchNorm2d(out_ch),
             nn.ReLU(inplace=True),
-            nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False),
+            nn.ReflectionPad2d(1),
+            nn.Conv2d(out_ch, out_ch, 3, padding=0, bias=False),
             nn.BatchNorm2d(out_ch),
             nn.ReLU(inplace=True),
         )
@@ -52,11 +54,12 @@ class Up(nn.Module):
 
     def forward(self, x1, x2):
         x1 = self.up(x1)
-        # Pad if sizes don't match
+        # Pad if sizes don't match (use reflect/mirror padding)
         diff_y = x2.size(2) - x1.size(2)
         diff_x = x2.size(3) - x1.size(3)
-        x1 = F.pad(x1, [diff_x // 2, diff_x - diff_x // 2,
-                        diff_y // 2, diff_y - diff_y // 2])
+        if diff_x > 0 or diff_y > 0:
+            x1 = F.pad(x1, [diff_x // 2, diff_x - diff_x // 2,
+                            diff_y // 2, diff_y - diff_y // 2], mode='reflect')
         x = torch.cat([x2, x1], dim=1)
         return self.conv(x)
 

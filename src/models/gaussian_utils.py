@@ -138,50 +138,51 @@ def apply_topk_importance(
     k: int,
 ) -> Dict[str, torch.Tensor]:
     """
-    Apply top-k selection based on IMPORTANCE (not opacity) with STE.
+    Apply top-k selection based on IMPORTANCE with STE for gradient flow.
 
-    Key insight: importance ≠ opacity
-    - Opacity: "How transparent is this Gaussian?" → affects blending
-    - Importance: "Should this Gaussian be rendered?" → affects selection
-
-    This allows large Gaussians with low opacity but high importance to survive.
+    Forward: exact hard top-k mask
+    Backward: gradients flow through soft gate (importance-based)
 
     Args:
         gaussians: Dictionary with Gaussian parameters (B, N, C)
         k: Number of top Gaussians to keep
 
     Returns:
-        Dictionary with masked opacities (top-k by importance, STE for gradients)
+        Dictionary with masked opacities
     """
     importance = gaussians['importance']  # (B, N, 1)
     opacities = gaussians['opacities']  # (B, N, 1)
     B, N, _ = importance.shape
 
-    # Clamp k to valid range
     k = min(k, N)
 
-    # Get top-k indices based on IMPORTANCE (not opacity!)
+    # Hard mask from top-k (non-differentiable)
     importance_flat = importance.squeeze(-1)  # (B, N)
     _, topk_indices = torch.topk(importance_flat, k, dim=1)  # (B, k)
+    hard_mask = torch.zeros_like(importance_flat)  # (B, N)
+    hard_mask.scatter_(1, topk_indices, 1.0)
+    hard_mask = hard_mask.unsqueeze(-1)  # (B, N, 1)
 
-    # Create binary mask for top-k
-    mask = torch.zeros_like(importance_flat)  # (B, N)
-    mask.scatter_(1, topk_indices, 1.0)
-    mask = mask.unsqueeze(-1)  # (B, N, 1)
+    # Soft gate from importance (differentiable)
+    # importance is already in [0, 1] from sigmoid
+    soft_gate = importance  # (B, N, 1)
 
-    # STE: forward uses masked opacity, backward passes gradient through all
-    # Forward: opacity * mask (only top-k contribute)
-    # Backward: gradients flow through all opacities
-    masked_opacities = opacities + (opacities * mask - opacities).detach()
+    # STE: forward=hard, backward=soft
+    # mask = hard + (soft - soft.detach())
+    # Forward: hard (exact top-k)
+    # Backward: d(mask)/d(importance) = d(soft)/d(importance)
+    mask = hard_mask + (soft_gate - soft_gate.detach())
 
-    # Return new gaussians dict with masked opacities
+    # Apply mask to opacities
+    masked_opacities = opacities * mask
+
     return {
         'means': gaussians['means'],
         'scales': gaussians['scales'],
         'rotations': gaussians['rotations'],
         'colors': gaussians['colors'],
         'opacities': masked_opacities,
-        'importance': gaussians['importance'],  # Keep importance for logging
+        'importance': gaussians['importance'],
     }
 
 
