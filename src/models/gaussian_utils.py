@@ -107,7 +107,7 @@ def parse_gaussian_params_10ch(raw_params: torch.Tensor) -> Dict[str, torch.Tens
 
     # Parse each parameter
     delta_mu = torch.tanh(params[..., 0:2]) * 0.5  # [-0.5, 0.5]
-    scale = F.softplus(params[..., 2:4])  # positive
+    scale = F.softplus(params[..., 2:4]) + 1.0  # minimum scale of 1.0
     rotation = params[..., 4:5]  # radians, unbounded
     color = torch.sigmoid(params[..., 5:8])  # [0, 1]
     opacity = torch.sigmoid(params[..., 8:9])  # [0, 1]

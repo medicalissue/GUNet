@@ -20,6 +20,8 @@ from torch.amp import autocast, GradScaler
 from tqdm import tqdm
 import yaml
 import matplotlib.pyplot as plt
+from matplotlib.patches import Ellipse
+from matplotlib.collections import PatchCollection
 import numpy as np
 
 # Add src to path
