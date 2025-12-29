@@ -1,8 +1,8 @@
 """
-Simple UNet for 10-channel Gaussian prediction.
+Simple UNet for 11-channel Gaussian prediction.
 
 Input: RGB image (3ch)
-Output: 10-channel Gaussian parameters per pixel
+Output: 11-channel Gaussian parameters per pixel
 """
 
 import torch
@@ -13,20 +13,72 @@ from typing import Dict
 from .gaussian_utils import parse_gaussian_params_11ch
 
 
+def get_padding_layer(pad_type: str, padding: int):
+    """
+    Get padding layer based on type.
+
+    Args:
+        pad_type: 'zero', 'reflect', 'replicate', 'circular'
+        padding: padding size
+
+    Returns:
+        nn.Module or None (for zero padding, use conv's built-in padding)
+    """
+    if pad_type == "zero":
+        return None  # Use conv's built-in padding
+    elif pad_type == "reflect":
+        return nn.ReflectionPad2d(padding)
+    elif pad_type == "replicate":
+        return nn.ReplicationPad2d(padding)
+    elif pad_type == "circular":
+        return nn.CircularPad2d(padding)
+    else:
+        raise ValueError(f"Unknown pad_type: {pad_type}. Use 'zero', 'reflect', 'replicate', or 'circular'")
+
+
+def get_pad_mode(pad_type: str) -> str:
+    """Get F.pad mode string from pad_type."""
+    if pad_type == "zero":
+        return "constant"
+    elif pad_type == "reflect":
+        return "reflect"
+    elif pad_type == "replicate":
+        return "replicate"
+    elif pad_type == "circular":
+        return "circular"
+    else:
+        return "reflect"  # default
+
+
 class DoubleConv(nn.Module):
-    """(ReflectionPad -> Conv -> BN -> ReLU) x 2"""
-    def __init__(self, in_ch, out_ch):
+    """(Pad -> Conv -> BN -> ReLU) x 2 with configurable padding."""
+    def __init__(self, in_ch, out_ch, pad_type: str = "reflect"):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.ReflectionPad2d(1),
-            nn.Conv2d(in_ch, out_ch, 3, padding=0, bias=False),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True),
-            nn.ReflectionPad2d(1),
-            nn.Conv2d(out_ch, out_ch, 3, padding=0, bias=False),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True),
-        )
+        self.pad_type = pad_type
+
+        if pad_type == "zero":
+            # Use conv's built-in padding for zero padding
+            self.net = nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, 3, padding=1, bias=False),
+                nn.BatchNorm2d(out_ch),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False),
+                nn.BatchNorm2d(out_ch),
+                nn.ReLU(inplace=True),
+            )
+        else:
+            # Use explicit padding layer
+            pad_layer = get_padding_layer(pad_type, 1)
+            self.net = nn.Sequential(
+                pad_layer,
+                nn.Conv2d(in_ch, out_ch, 3, padding=0, bias=False),
+                nn.BatchNorm2d(out_ch),
+                nn.ReLU(inplace=True),
+                get_padding_layer(pad_type, 1),
+                nn.Conv2d(out_ch, out_ch, 3, padding=0, bias=False),
+                nn.BatchNorm2d(out_ch),
+                nn.ReLU(inplace=True),
+            )
 
     def forward(self, x):
         return self.net(x)
@@ -56,10 +108,11 @@ class AttentionPool2d(nn.Module):
 
 
 class Down(nn.Module):
-    """Downsample -> DoubleConv with configurable pooling."""
-    def __init__(self, in_ch, out_ch, pool_type: str = "max"):
+    """Downsample -> DoubleConv with configurable pooling and padding."""
+    def __init__(self, in_ch, out_ch, pool_type: str = "max", pad_type: str = "reflect"):
         super().__init__()
         self.pool_type = pool_type
+        self.pad_type = pad_type
 
         if pool_type == "max":
             self.pool = nn.MaxPool2d(2)
@@ -68,17 +121,25 @@ class Down(nn.Module):
         elif pool_type == "attn":
             self.pool = AttentionPool2d(in_ch)
         elif pool_type == "strided":
-            # Strided conv does pooling + channel change together
-            self.pool = nn.Sequential(
-                nn.ReflectionPad2d(1),
-                nn.Conv2d(in_ch, in_ch, kernel_size=3, stride=2, padding=0, bias=False),
-                nn.BatchNorm2d(in_ch),
-                nn.ReLU(inplace=True),
-            )
+            # Strided conv with configurable padding
+            if pad_type == "zero":
+                self.pool = nn.Sequential(
+                    nn.Conv2d(in_ch, in_ch, kernel_size=3, stride=2, padding=1, bias=False),
+                    nn.BatchNorm2d(in_ch),
+                    nn.ReLU(inplace=True),
+                )
+            else:
+                pad_layer = get_padding_layer(pad_type, 1)
+                self.pool = nn.Sequential(
+                    pad_layer,
+                    nn.Conv2d(in_ch, in_ch, kernel_size=3, stride=2, padding=0, bias=False),
+                    nn.BatchNorm2d(in_ch),
+                    nn.ReLU(inplace=True),
+                )
         else:
             raise ValueError(f"Unknown pool_type: {pool_type}. Use 'max', 'avg', 'attn', or 'strided'")
 
-        self.conv = DoubleConv(in_ch, out_ch)
+        self.conv = DoubleConv(in_ch, out_ch, pad_type)
 
     def forward(self, x):
         x = self.pool(x)
@@ -86,20 +147,22 @@ class Down(nn.Module):
 
 
 class Up(nn.Module):
-    """Upsample -> Concat skip -> DoubleConv"""
-    def __init__(self, in_ch, out_ch):
+    """Upsample -> Concat skip -> DoubleConv with configurable padding."""
+    def __init__(self, in_ch, out_ch, pad_type: str = "reflect"):
         super().__init__()
+        self.pad_type = pad_type
+        self.pad_mode = get_pad_mode(pad_type)
         self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
-        self.conv = DoubleConv(in_ch, out_ch)
+        self.conv = DoubleConv(in_ch, out_ch, pad_type)
 
     def forward(self, x1, x2):
         x1 = self.up(x1)
-        # Pad if sizes don't match (use reflect/mirror padding)
+        # Pad if sizes don't match
         diff_y = x2.size(2) - x1.size(2)
         diff_x = x2.size(3) - x1.size(3)
         if diff_x > 0 or diff_y > 0:
             x1 = F.pad(x1, [diff_x // 2, diff_x - diff_x // 2,
-                            diff_y // 2, diff_y - diff_y // 2], mode='reflect')
+                            diff_y // 2, diff_y - diff_y // 2], mode=self.pad_mode)
         x = torch.cat([x2, x1], dim=1)
         return self.conv(x)
 
@@ -125,6 +188,12 @@ class GaussianSplitNet(nn.Module):
         - 'avg': AvgPool2d - smoother, reduces noise
         - 'attn': AttentionPool2d - learned adaptive pooling
         - 'strided': Strided convolution - learnable downsampling
+
+    Pad types:
+        - 'zero': Zero padding - may cause border artifacts
+        - 'reflect': Reflection padding (default) - mirrors at boundary
+        - 'replicate': Replication padding - repeats edge pixels
+        - 'circular': Circular padding - wraps around (for tiled textures)
     """
 
     def __init__(
@@ -133,21 +202,23 @@ class GaussianSplitNet(nn.Module):
         base_channels: int = 64,
         num_levels: int = 4,  # Unused, kept for API compatibility
         pool_type: str = "max",
+        pad_type: str = "reflect",
     ):
         super().__init__()
         _ = num_levels
         self.pool_type = pool_type
+        self.pad_type = pad_type
 
         # Encoder
-        self.inc = DoubleConv(in_channels, base_channels)      # 3 -> 64
-        self.down1 = Down(base_channels, base_channels * 2, pool_type)    # 64 -> 128
-        self.down2 = Down(base_channels * 2, base_channels * 4, pool_type)  # 128 -> 256
-        self.down3 = Down(base_channels * 4, base_channels * 8, pool_type)  # 256 -> 512
+        self.inc = DoubleConv(in_channels, base_channels, pad_type)      # 3 -> 64
+        self.down1 = Down(base_channels, base_channels * 2, pool_type, pad_type)    # 64 -> 128
+        self.down2 = Down(base_channels * 2, base_channels * 4, pool_type, pad_type)  # 128 -> 256
+        self.down3 = Down(base_channels * 4, base_channels * 8, pool_type, pad_type)  # 256 -> 512
 
         # Decoder
-        self.up1 = Up(base_channels * 8 + base_channels * 4, base_channels * 4)  # 512+256 -> 256
-        self.up2 = Up(base_channels * 4 + base_channels * 2, base_channels * 2)  # 256+128 -> 128
-        self.up3 = Up(base_channels * 2 + base_channels, base_channels)          # 128+64 -> 64
+        self.up1 = Up(base_channels * 8 + base_channels * 4, base_channels * 4, pad_type)  # 512+256 -> 256
+        self.up2 = Up(base_channels * 4 + base_channels * 2, base_channels * 2, pad_type)  # 256+128 -> 128
+        self.up3 = Up(base_channels * 2 + base_channels, base_channels, pad_type)          # 128+64 -> 64
 
         # Output head: 64 -> 11 (with depth)
         self.outc = nn.Conv2d(base_channels, 11, kernel_size=1)
@@ -180,4 +251,4 @@ class GaussianSplitNet(nn.Module):
         return H * W
 
     def get_gaussian_info(self, H: int, W: int) -> str:
-        return f"GaussianSplitNet (pool={self.pool_type}): {H}x{W} = {H*W:,} Gaussians"
+        return f"GaussianSplitNet (pool={self.pool_type}, pad={self.pad_type}): {H}x{W} = {H*W:,} Gaussians"

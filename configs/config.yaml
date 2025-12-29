@@ -11,6 +11,7 @@ num_levels: 4        # Total encoder/decoder levels
 start_level: 0       # Start Gaussian output from this level (only for unet)
                      # start_level=1 means: 128x128, 64x64, 32x32, 16x16 (skip 256x256)
 pool_type: attn       # Pooling type: 'max', 'avg', 'attn' (attention), 'strided' (strided conv)
+pad_type: zero     # Padding type: 'zero', 'reflect', 'replicate', 'circular'
 
 # Training
 batch_size: 64

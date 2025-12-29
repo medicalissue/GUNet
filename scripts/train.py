@@ -90,6 +90,8 @@ def parse_args():
                         help='Base number of channels')
     parser.add_argument('--pool_type', type=str, default='max',
                         help='Pooling type: max, avg, attn, strided')
+    parser.add_argument('--pad_type', type=str, default='reflect',
+                        help='Padding type: zero, reflect, replicate, circular')
     parser.add_argument('--num_levels', type=int, default=5,
                         help='Number of pyramid levels')
     parser.add_argument('--start_level', type=int, default=0,
@@ -208,6 +210,7 @@ def parse_args():
     print(f"model_type: {args.model_type}")
     print(f"num_levels: {args.num_levels}")
     print(f"pool_type: {args.pool_type}")
+    print(f"pad_type: {args.pad_type}")
     if args.model_type == 'unet':
         print(f"start_level: {args.start_level}")
     print(f"use_topk: {args.use_topk}")
@@ -895,6 +898,7 @@ def main():
             base_channels=args.base_channels,
             num_levels=args.num_levels,
             pool_type=args.pool_type,
+            pad_type=args.pad_type,
         ).to(device)
     else:  # 'unet'
         model = MultiScaleGaussianUNet(
