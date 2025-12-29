@@ -16,6 +16,7 @@ import torch
 import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.amp import autocast, GradScaler
 from tqdm import tqdm
 import yaml
 import matplotlib.pyplot as plt
@@ -24,9 +25,16 @@ import numpy as np
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.models import MultiScaleGaussianUNet
-from src.models.gaussian_utils import apply_topk_opacity
+from src.models import MultiScaleGaussianUNet, GaussianSplitNet
+from src.models.gaussian_utils import apply_topk_opacity, apply_topk_importance
 from src.rendering import render_gaussians_2d
+
+
+def cast_gaussians_to_float32(gaussians: dict) -> dict:
+    """Cast all Gaussian tensors to float32 for rendering (gsplat requires float32)."""
+    return {k: v.float() if torch.is_tensor(v) else v for k, v in gaussians.items()}
+
+
 from src.losses import ReconstructionLoss
 from src.data import ImageDataset
 from torch.utils.data import DataLoader
@@ -73,12 +81,15 @@ def parse_args():
                         help='Image size for training')
 
     # Model
+    parser.add_argument('--model_type', type=str, default='unet',
+                        choices=['unet', 'split'],
+                        help='Model architecture: unet (UNet decoder) or split (Gaussian split decoder)')
     parser.add_argument('--base_channels', type=int, default=64,
                         help='Base number of channels')
     parser.add_argument('--num_levels', type=int, default=5,
                         help='Number of pyramid levels')
     parser.add_argument('--start_level', type=int, default=0,
-                        help='First level to output Gaussians (0=full res, 1=half, etc.)')
+                        help='First level to output Gaussians (0=full res, 1=half, etc.) - only for unet')
 
     # Training
     parser.add_argument('--batch_size', type=int, default=8,
@@ -111,6 +122,10 @@ def parse_args():
                         help='Use top-k opacity selection for rendering')
     parser.add_argument('--topk_count', type=int, default=1024,
                         help='Number of top-k Gaussians to render')
+
+    # Mixed precision
+    parser.add_argument('--use_amp', action='store_true',
+                        help='Use automatic mixed precision (AMP) for faster training')
 
     # Checkpointing
     parser.add_argument('--save_dir', type=str, default='./checkpoints',
@@ -165,16 +180,25 @@ def parse_args():
         args.use_topk = False
     args.topk_count = int(args.topk_count)
 
+    # Handle use_amp from config
+    if hasattr(args, 'use_amp') and args.use_amp is not None:
+        args.use_amp = bool(args.use_amp)
+    else:
+        args.use_amp = False
+
     # Print loaded config
     print(f"=== Config ===")
     print(f"data_dir: {args.data_dir}")
     print(f"image_size: {args.image_size}")
     print(f"batch_size: {args.batch_size}")
+    print(f"model_type: {args.model_type}")
     print(f"num_levels: {args.num_levels}")
-    print(f"start_level: {args.start_level}")
+    if args.model_type == 'unet':
+        print(f"start_level: {args.start_level}")
     print(f"use_topk: {args.use_topk}")
     if args.use_topk:
         print(f"topk_count: {args.topk_count}")
+    print(f"use_amp: {args.use_amp}")
     print(f"vis_every: {args.vis_every}")
     print(f"==============")
 
@@ -230,6 +254,7 @@ def visualize_reconstruction(
     - Reconstructed image
     - Per-level Gaussian visualizations
     - Difference map
+    - Importance maps (for GaussianSplitNet)
     """
     model.eval()
 
@@ -241,7 +266,8 @@ def visualize_reconstruction(
     gaussians = output['gaussians']
     multi_scale = output['multi_scale_gaussians']
 
-    # Render full reconstruction
+    # Cast to float32 and render full reconstruction
+    gaussians = cast_gaussians_to_float32(gaussians)
     rendered = render_gaussians_2d(gaussians, H, W)
 
     # Compute metrics
@@ -255,11 +281,13 @@ def visualize_reconstruction(
     recon = rendered[0].cpu().permute(1, 2, 0).numpy()
     diff = np.abs(orig - recon)
 
-    # Create figure
+    # Create figure - add extra row for encoder/decoder comparison if available
     num_levels = len(multi_scale)
-    fig, axes = plt.subplots(2, num_levels + 2, figsize=(4 * (num_levels + 2), 8))
+    has_enc_dec = 'encoder_gaussians' in output and output['encoder_gaussians'] is not None
+    num_rows = 3 if has_enc_dec else 2
+    fig, axes = plt.subplots(num_rows, num_levels + 2, figsize=(4 * (num_levels + 2), 4 * num_rows))
 
-    # Row 1: Original, Reconstructed, Difference, Per-level contributions
+    # Row 1: Original, Reconstructed, Per-level contributions
     axes[0, 0].imshow(orig.clip(0, 1))
     axes[0, 0].set_title('Original')
     axes[0, 0].axis('off')
@@ -270,13 +298,13 @@ def visualize_reconstruction(
 
     # Render each level separately
     for i, level_gaussians in enumerate(multi_scale):
-        # Flatten this level's gaussians
+        # Flatten this level's gaussians and cast to float32
         level_dict = {
-            'means': level_gaussians['means'][:1].reshape(1, -1, 2),
-            'scales': level_gaussians['scales'][:1].reshape(1, -1, 2),
-            'rotations': level_gaussians['rotations'][:1].reshape(1, -1, 1),
-            'colors': level_gaussians['colors'][:1].reshape(1, -1, 3),
-            'opacities': level_gaussians['opacities'][:1].reshape(1, -1, 1),
+            'means': level_gaussians['means'][:1].reshape(1, -1, 2).float(),
+            'scales': level_gaussians['scales'][:1].reshape(1, -1, 2).float(),
+            'rotations': level_gaussians['rotations'][:1].reshape(1, -1, 1).float(),
+            'colors': level_gaussians['colors'][:1].reshape(1, -1, 3).float(),
+            'opacities': level_gaussians['opacities'][:1].reshape(1, -1, 1).float(),
         }
         level_rendered = render_gaussians_2d(level_dict, H, W)
         level_img = level_rendered[0].cpu().permute(1, 2, 0).numpy()
@@ -286,7 +314,7 @@ def visualize_reconstruction(
         axes[0, i + 2].set_title(f'Level {level_idx}\n({level_dict["means"].shape[1]} G)')
         axes[0, i + 2].axis('off')
 
-    # Row 2: Difference map, Gaussian positions visualization
+    # Row 2: Difference map, Gaussian positions, Scale distributions
     axes[1, 0].imshow(diff.clip(0, 1))
     axes[1, 0].set_title('Difference (|orig - recon|)')
     axes[1, 0].axis('off')
@@ -318,6 +346,59 @@ def visualize_reconstruction(
         axes[1, i + 2].set_title(f'L{level_gaussians.get("level", i)} Scales\nmean={mean_scale:.2f}')
         axes[1, i + 2].set_xlabel('Scale (pixels)')
 
+    # Row 3: Encoder vs Decoder comparison (for symmetric network)
+    encoder_gaussians = output.get('encoder_gaussians', None)
+    decoder_gaussians = output.get('decoder_gaussians', None)
+
+    if encoder_gaussians and decoder_gaussians:
+        # Render encoder-only reconstruction
+        from src.models.gaussian_utils import merge_multi_scale_gaussians
+        enc_merged = merge_multi_scale_gaussians(encoder_gaussians)
+        enc_merged = cast_gaussians_to_float32(enc_merged)
+        enc_rendered = render_gaussians_2d(enc_merged, H, W)
+        enc_img = enc_rendered[0].cpu().permute(1, 2, 0).numpy()
+
+        axes[2, 0].imshow(enc_img.clip(0, 1))
+        axes[2, 0].set_title(f'Encoder Only\n({enc_merged["means"].shape[1]} G)')
+        axes[2, 0].axis('off')
+
+        # Render decoder-only reconstruction
+        dec_merged = merge_multi_scale_gaussians(decoder_gaussians)
+        dec_merged = cast_gaussians_to_float32(dec_merged)
+        dec_rendered = render_gaussians_2d(dec_merged, H, W)
+        dec_img = dec_rendered[0].cpu().permute(1, 2, 0).numpy()
+
+        axes[2, 1].imshow(dec_img.clip(0, 1))
+        axes[2, 1].set_title(f'Decoder Only\n({dec_merged["means"].shape[1]} G)')
+        axes[2, 1].axis('off')
+
+        # Opacity distributions for encoder and decoder
+        enc_opacities = enc_merged['opacities'][0].cpu().numpy().squeeze()
+        dec_opacities = dec_merged['opacities'][0].cpu().numpy().squeeze()
+
+        axes[2, 2].hist(enc_opacities, bins=50, alpha=0.7, color='blue', label='Encoder')
+        axes[2, 2].hist(dec_opacities, bins=50, alpha=0.7, color='orange', label='Decoder')
+        axes[2, 2].legend()
+        axes[2, 2].set_title('Opacity Distributions')
+        axes[2, 2].set_xlabel('Opacity')
+
+        # Fill remaining cells with per-level encoder Gaussians
+        for i in range(min(len(encoder_gaussians), num_levels - 1)):
+            if i + 3 < num_levels + 2:
+                level_g = encoder_gaussians[i]
+                level_dict = {
+                    'means': level_g['means'][:1].reshape(1, -1, 2).float(),
+                    'scales': level_g['scales'][:1].reshape(1, -1, 2).float(),
+                    'rotations': level_g['rotations'][:1].reshape(1, -1, 1).float(),
+                    'colors': level_g['colors'][:1].reshape(1, -1, 3).float(),
+                    'opacities': level_g['opacities'][:1].reshape(1, -1, 1).float(),
+                }
+                level_rendered = render_gaussians_2d(level_dict, H, W)
+                level_img = level_rendered[0].cpu().permute(1, 2, 0).numpy()
+                axes[2, i + 3].imshow(level_img.clip(0, 1))
+                axes[2, i + 3].set_title(f'Enc L{level_g.get("level", i)}')
+                axes[2, i + 3].axis('off')
+
     plt.suptitle(f'Epoch {epoch}, Batch {batch_idx}', fontsize=14)
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
@@ -341,6 +422,7 @@ def visualize_gaussians_detail(
 
     output = model(images)
     gaussians = output['gaussians']
+    gaussians = cast_gaussians_to_float32(gaussians)
 
     # Get parameters
     means = gaussians['means'][0].cpu().numpy()
@@ -408,6 +490,8 @@ def train_one_epoch(
     vis_every: int = 100,
     use_topk: bool = False,
     topk_count: int = 1024,
+    use_amp: bool = False,
+    scaler: GradScaler = None,
 ) -> dict:
     """Train for one epoch with visualization."""
     model.train()
@@ -430,27 +514,39 @@ def train_one_epoch(
         # Forward pass
         optimizer.zero_grad()
 
-        output = model(images)
-        gaussians = output['gaussians']
+        # Use autocast for mixed precision (only for model forward)
+        with autocast('cuda', enabled=use_amp):
+            output = model(images)
+            gaussians = output['gaussians']
 
-        # Apply top-k selection if enabled
-        if use_topk:
-            gaussians = apply_topk_opacity(gaussians, topk_count)
+            # Apply top-k selection if enabled
+            if use_topk:
+                # Use importance-based selection if available (GaussianSplitNet)
+                if 'importance' in gaussians:
+                    gaussians = apply_topk_importance(gaussians, topk_count)
+                else:
+                    gaussians = apply_topk_opacity(gaussians, topk_count)
 
-        # Render Gaussians
-        rendered = render_gaussians_2d(gaussians, H, W)
+        # Render Gaussians OUTSIDE autocast (gsplat requires float32)
+        gaussians_f32 = cast_gaussians_to_float32(gaussians)
+        rendered = render_gaussians_2d(gaussians_f32, H, W)
 
         # Compute loss (pass gaussians for count loss)
-        losses = criterion(rendered, images, gaussians)
+        losses = criterion(rendered, images, gaussians_f32)
         loss = losses['total']
 
         # Compute PSNR
         with torch.no_grad():
             psnr = compute_psnr(rendered, images)
 
-        # Backward pass
-        loss.backward()
-        optimizer.step()
+        # Backward pass with scaler for mixed precision
+        if use_amp and scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
 
         # Accumulate metrics
         total_loss += loss.item()
@@ -519,6 +615,7 @@ def validate(
 
         output = model(images)
         gaussians = output['gaussians']
+        gaussians = cast_gaussians_to_float32(gaussians)
         rendered = render_gaussians_2d(gaussians, H, W)
 
         losses = criterion(rendered, images)
@@ -625,12 +722,19 @@ def main():
     )
 
     # Model
-    model = MultiScaleGaussianUNet(
-        in_channels=3,
-        base_channels=args.base_channels,
-        num_levels=args.num_levels,
-        start_level=args.start_level,
-    ).to(device)
+    if args.model_type == 'split':
+        model = GaussianSplitNet(
+            in_channels=3,
+            base_channels=args.base_channels,
+            num_levels=args.num_levels,
+        ).to(device)
+    else:  # 'unet'
+        model = MultiScaleGaussianUNet(
+            in_channels=3,
+            base_channels=args.base_channels,
+            num_levels=args.num_levels,
+            start_level=args.start_level,
+        ).to(device)
 
     # Print model info
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -660,12 +764,17 @@ def main():
         print(f'Sparsity loss enabled: weight={args.sparsity_weight}')
     if args.use_topk:
         print(f'Top-k selection enabled: k={args.topk_count}')
+    if args.use_amp:
+        print(f'Mixed precision (AMP) enabled')
 
     # Optimizer
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
 
     # Scheduler
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
+
+    # Mixed precision scaler
+    scaler = GradScaler('cuda', enabled=args.use_amp)
 
     # Resume from checkpoint
     start_epoch = 0
@@ -683,7 +792,8 @@ def main():
         train_metrics = train_one_epoch(
             model, dataloader, criterion, optimizer, device, epoch,
             vis_dir=vis_dir, vis_every=args.vis_every,
-            use_topk=args.use_topk, topk_count=args.topk_count
+            use_topk=args.use_topk, topk_count=args.topk_count,
+            use_amp=args.use_amp, scaler=scaler,
         )
 
         # Update scheduler

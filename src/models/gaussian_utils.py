@@ -1,12 +1,19 @@
 """
 Gaussian utilities for Multi-Scale Gaussian UNet.
 
-Each Gaussian has 9 parameters:
+Each Gaussian has 10 parameters:
 - delta_mu: (2) offset from pixel center, in range [-0.5, 0.5]
 - scale: (2) Gaussian scale (softplus applied for stability)
 - rotation: (1) rotation angle in radians
 - color: (3) RGB color
 - opacity: (1) opacity value (sigmoid applied to get [0,1])
+- importance: (1) importance score for top-k selection (separate from opacity!)
+
+Key insight: importance ≠ opacity
+- Opacity: "How transparent is this Gaussian?"
+- Importance: "Should this Gaussian be rendered at all?"
+
+This allows large, low-opacity Gaussians to survive top-k selection.
 """
 
 import torch
@@ -70,6 +77,111 @@ def parse_gaussian_params(raw_params: torch.Tensor) -> Dict[str, torch.Tensor]:
         'rotation': rotation,
         'color': color,
         'opacity': opacity,
+    }
+
+
+def parse_gaussian_params_10ch(raw_params: torch.Tensor) -> Dict[str, torch.Tensor]:
+    """
+    Parse raw 10-channel output into Gaussian parameters.
+
+    10 channels = 9 Gaussian params + 1 importance score.
+
+    Args:
+        raw_params: (B, 10, H, W) raw network output
+
+    Returns:
+        Dictionary with parsed parameters:
+        - means: (B, N, 2) absolute positions in image coordinates
+        - scales: (B, N, 2) positive scale values
+        - rotations: (B, N, 1) rotation angle in radians
+        - colors: (B, N, 3) RGB in [0, 1]
+        - opacities: (B, N, 1) opacity in [0, 1]
+        - importance: (B, N, 1) importance score in [0, 1]
+    """
+    B, C, H, W = raw_params.shape
+    assert C == 10, f"Expected 10 channels, got {C}"
+    device = raw_params.device
+
+    # Rearrange to (B, H, W, 10)
+    params = raw_params.permute(0, 2, 3, 1)
+
+    # Parse each parameter
+    delta_mu = torch.tanh(params[..., 0:2]) * 0.5  # [-0.5, 0.5]
+    scale = F.softplus(params[..., 2:4])  # positive
+    rotation = params[..., 4:5]  # radians, unbounded
+    color = torch.sigmoid(params[..., 5:8])  # [0, 1]
+    opacity = torch.sigmoid(params[..., 8:9])  # [0, 1]
+    importance = torch.sigmoid(params[..., 9:10])  # [0, 1]
+
+    # Create pixel coordinate grid
+    coords = create_pixel_coords(H, W, device)  # (H, W, 2)
+
+    # Compute absolute mean positions
+    # means = pixel_coord + delta_mu
+    means = coords.unsqueeze(0) + delta_mu  # (B, H, W, 2)
+
+    # Flatten spatial dimensions: (B, H, W, C) -> (B, N, C)
+    N = H * W
+
+    return {
+        'means': means.reshape(B, N, 2),
+        'scales': scale.reshape(B, N, 2),
+        'rotations': rotation.reshape(B, N, 1),
+        'colors': color.reshape(B, N, 3),
+        'opacities': opacity.reshape(B, N, 1),
+        'importance': importance.reshape(B, N, 1),
+    }
+
+
+def apply_topk_importance(
+    gaussians: Dict[str, torch.Tensor],
+    k: int,
+) -> Dict[str, torch.Tensor]:
+    """
+    Apply top-k selection based on IMPORTANCE (not opacity) with STE.
+
+    Key insight: importance ≠ opacity
+    - Opacity: "How transparent is this Gaussian?" → affects blending
+    - Importance: "Should this Gaussian be rendered?" → affects selection
+
+    This allows large Gaussians with low opacity but high importance to survive.
+
+    Args:
+        gaussians: Dictionary with Gaussian parameters (B, N, C)
+        k: Number of top Gaussians to keep
+
+    Returns:
+        Dictionary with masked opacities (top-k by importance, STE for gradients)
+    """
+    importance = gaussians['importance']  # (B, N, 1)
+    opacities = gaussians['opacities']  # (B, N, 1)
+    B, N, _ = importance.shape
+
+    # Clamp k to valid range
+    k = min(k, N)
+
+    # Get top-k indices based on IMPORTANCE (not opacity!)
+    importance_flat = importance.squeeze(-1)  # (B, N)
+    _, topk_indices = torch.topk(importance_flat, k, dim=1)  # (B, k)
+
+    # Create binary mask for top-k
+    mask = torch.zeros_like(importance_flat)  # (B, N)
+    mask.scatter_(1, topk_indices, 1.0)
+    mask = mask.unsqueeze(-1)  # (B, N, 1)
+
+    # STE: forward uses masked opacity, backward passes gradient through all
+    # Forward: opacity * mask (only top-k contribute)
+    # Backward: gradients flow through all opacities
+    masked_opacities = opacities + (opacities * mask - opacities).detach()
+
+    # Return new gaussians dict with masked opacities
+    return {
+        'means': gaussians['means'],
+        'scales': gaussians['scales'],
+        'rotations': gaussians['rotations'],
+        'colors': gaussians['colors'],
+        'opacities': masked_opacities,
+        'importance': gaussians['importance'],  # Keep importance for logging
     }
 
 

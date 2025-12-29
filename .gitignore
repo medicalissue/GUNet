@@ -7,3 +7,4 @@ visualizations/
 *.jpg
 *.pt
 *.pth
+*.pyc

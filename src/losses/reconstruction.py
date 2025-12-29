@@ -4,13 +4,14 @@ Reconstruction losses for 2D Gaussian Splatting.
 Includes:
 - L1 Loss: Pixel-wise absolute difference
 - SSIM Loss: Structural similarity
+- Importance Loss: Guide importance maps to match image complexity
 - Combined weighted loss
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 try:
     from pytorch_msssim import ssim, ms_ssim
@@ -23,6 +24,82 @@ try:
     LPIPS_AVAILABLE = True
 except ImportError:
     LPIPS_AVAILABLE = False
+
+
+def compute_edge_map(image: torch.Tensor) -> torch.Tensor:
+    """
+    Compute edge magnitude map from image using Sobel filters.
+
+    High values indicate complex regions (edges, textures).
+    Low values indicate simple regions (flat areas).
+
+    Args:
+        image: (B, 3, H, W) input image in [0, 1]
+
+    Returns:
+        edge_map: (B, 1, H, W) edge magnitude in [0, 1]
+    """
+    B, C, H, W = image.shape
+    device = image.device
+
+    # Convert to grayscale: 0.299*R + 0.587*G + 0.114*B
+    gray = 0.299 * image[:, 0:1] + 0.587 * image[:, 1:2] + 0.114 * image[:, 2:3]
+
+    # Sobel kernels
+    sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+                           dtype=torch.float32, device=device).view(1, 1, 3, 3)
+    sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+                           dtype=torch.float32, device=device).view(1, 1, 3, 3)
+
+    # Compute gradients
+    grad_x = F.conv2d(gray, sobel_x, padding=1)
+    grad_y = F.conv2d(gray, sobel_y, padding=1)
+
+    # Edge magnitude
+    edge_mag = torch.sqrt(grad_x ** 2 + grad_y ** 2 + 1e-8)
+
+    # Normalize to [0, 1] per-image
+    edge_min = edge_mag.view(B, -1).min(dim=1, keepdim=True)[0].view(B, 1, 1, 1)
+    edge_max = edge_mag.view(B, -1).max(dim=1, keepdim=True)[0].view(B, 1, 1, 1)
+    edge_map = (edge_mag - edge_min) / (edge_max - edge_min + 1e-8)
+
+    return edge_map
+
+
+def compute_importance_loss(
+    importance_maps: List[torch.Tensor],
+    target_image: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Compute importance guidance loss.
+
+    Encourages importance maps to be high where image has edges/complexity.
+
+    Args:
+        importance_maps: List of (B, 1, H_l, W_l) importance maps at each level
+        target_image: (B, 3, H, W) target image
+
+    Returns:
+        importance_loss: Scalar loss
+    """
+    B, C, H, W = target_image.shape
+    device = target_image.device
+
+    # Compute edge map at full resolution
+    edge_map = compute_edge_map(target_image)  # (B, 1, H, W)
+
+    total_loss = 0.0
+    for imp in importance_maps:
+        # Downsample edge map to match importance map resolution
+        imp_h, imp_w = imp.shape[2:]
+        edge_downsampled = F.interpolate(edge_map, size=(imp_h, imp_w),
+                                         mode='bilinear', align_corners=True)
+
+        # MSE loss between importance and edge map
+        # This encourages: high edges → high importance
+        total_loss = total_loss + F.mse_loss(imp, edge_downsampled)
+
+    return total_loss / len(importance_maps)
 
 
 def gaussian_window(size: int, sigma: float, device: torch.device) -> torch.Tensor:

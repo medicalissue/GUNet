@@ -5,9 +5,10 @@ data_dir: /data/ImageNet/train/ #./data/CLEVR_v1.0/images/train
 image_size: 256
 
 # Model
+model_type: split    # 'unet' (UNet decoder) or 'split' (Gaussian split decoder)
 base_channels: 64
 num_levels: 4        # Total encoder/decoder levels
-start_level: 0       # Start Gaussian output from this level (0=full res, 1=half, 2=quarter...)
+start_level: 0       # Start Gaussian output from this level (only for unet)
                      # start_level=1 means: 128x128, 64x64, 32x32, 16x16 (skip 256x256)
 
 # Training
@@ -21,13 +22,16 @@ l1_weight: 0.8
 ssim_weight: 0.2
 lpips_weight: 0.1        # Weight for LPIPS perceptual loss (0 to disable)
 count_weight: 0.00000     # Weight for Gaussian count loss (0 to disable)
-target_count: 1024       # Target number of effective Gaussians (null to penalize all)
+target_count: 256       # Target number of effective Gaussians (null to penalize all)
 scale_weight: 0.0        # Weight for scale loss - penalizes small scales (0 to disable)
 sparsity_weight: 0.0     # Weight for sparsity loss - encourages binary opacity (0 to disable)
 
 # Top-k selection
-use_topk: false           # Use top-k opacity selection (STE: forward=top-k only, backward=all)
+use_topk: true           # Use top-k opacity selection (STE: forward=top-k only, backward=all)
 topk_count: 1024         # Number of Gaussians to render (top-k by opacity)
+
+# Mixed precision
+use_amp: true            # Use automatic mixed precision (AMP) for faster training
 
 # Checkpointing
 save_dir: ./checkpoints
