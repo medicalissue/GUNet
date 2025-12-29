@@ -252,6 +252,77 @@ def apply_topk_importance(
     return result
 
 
+def apply_topk_torchsort(
+    gaussians: Dict[str, torch.Tensor],
+    k: int,
+    regularization_strength: float = 1.0,
+) -> Dict[str, torch.Tensor]:
+    """
+    Apply top-k selection using torchsort's differentiable ranking.
+
+    Unlike STE which only passes gradients through importance values,
+    torchsort makes the RANKING itself differentiable. This means:
+    - Gradients flow through "which elements are in top-k"
+    - Elements near the k-th boundary get meaningful gradients
+
+    Args:
+        gaussians: Dictionary with Gaussian parameters (B, N, C)
+        k: Number of top Gaussians to keep
+        regularization_strength: Controls softness of ranking
+            - Lower = harder (more like true ranking)
+            - Higher = softer (smoother gradients)
+
+    Returns:
+        Dictionary with masked opacities
+    """
+    from torchsort import soft_rank
+
+    importance = gaussians['importance']  # (B, N, 1)
+    opacities = gaussians['opacities']  # (B, N, 1)
+    B, N, _ = importance.shape
+
+    k = min(k, N)
+
+    # Get soft ranks (lower rank = higher importance)
+    # Negate importance so high importance -> low rank
+    importance_flat = importance.squeeze(-1)  # (B, N)
+    ranks = soft_rank(
+        -importance_flat,
+        regularization='l2',
+        regularization_strength=regularization_strength,
+    )  # (B, N), ranks in [1, N]
+
+    # Soft mask: rank <= k -> 1, rank > k -> 0
+    # Use sigmoid with sharpness factor for smooth boundary
+    sharpness = 10.0 / regularization_strength  # sharper when reg is lower
+    soft_mask = torch.sigmoid((k + 0.5 - ranks) * sharpness)  # (B, N)
+    soft_mask = soft_mask.unsqueeze(-1)  # (B, N, 1)
+
+    # For forward pass, use hard mask (exact top-k)
+    hard_mask = (ranks <= k).float().unsqueeze(-1)  # (B, N, 1)
+
+    # STE: forward=hard, backward=soft
+    mask = hard_mask + (soft_mask - soft_mask.detach())
+
+    # Apply mask to opacities
+    masked_opacities = opacities * mask
+
+    result = {
+        'means': gaussians['means'],
+        'scales': gaussians['scales'],
+        'rotations': gaussians['rotations'],
+        'colors': gaussians['colors'],
+        'opacities': masked_opacities,
+        'importance': gaussians['importance'],
+    }
+
+    # Pass through depths if present
+    if 'depths' in gaussians:
+        result['depths'] = gaussians['depths']
+
+    return result
+
+
 def upsample_gaussians(
     params: Dict[str, torch.Tensor],
     level: int,
@@ -359,6 +430,72 @@ def compute_total_gaussians(H: int, W: int, num_levels: int) -> int:
         w = W // (2 ** l)
         total += h * w
     return total
+
+
+def make_identity_gaussians(image: torch.Tensor) -> torch.Tensor:
+    """
+    Create identity Gaussian input from RGB image.
+
+    Instead of feeding raw RGB (3ch) to the network, we create 11-channel
+    "identity Gaussians" where each pixel is initialized as a valid Gaussian.
+
+    Identity Gaussian for pixel (x, y) with color RGB:
+    - delta_mu = 0 (position = pixel center)
+    - scale = 1 (unit scale)
+    - rotation = 0 (no rotation)
+    - color = RGB (from image)
+    - opacity = 1 (fully opaque)
+    - importance = 1 (fully important)
+    - depth = 1 (unit depth)
+
+    The network learns to REFINE these rather than predict from scratch.
+    This is residual learning - output ≈ identity + delta.
+
+    Args:
+        image: (B, 3, H, W) RGB image in [0, 1]
+
+    Returns:
+        identity_gaussians: (B, 11, H, W) identity Gaussian parameters
+            - ch 0-1: delta_mu = 0
+            - ch 2-3: scale_raw = 0 (so softplus(0)+1 = 1)
+            - ch 4: rotation = 0
+            - ch 5-7: color_raw = logit(RGB) (so sigmoid(logit(RGB)) = RGB)
+            - ch 8: opacity_raw = 5 (so sigmoid(5) ≈ 0.993)
+            - ch 9: importance_raw = 5 (so sigmoid(5) ≈ 0.993)
+            - ch 10: depth_raw = 0.54 (so softplus(0.54) ≈ 1)
+    """
+    B, C, H, W = image.shape
+    assert C == 3, f"Expected 3-channel RGB image, got {C} channels"
+    device = image.device
+    dtype = image.dtype
+
+    # Initialize 11-channel identity
+    identity = torch.zeros(B, 11, H, W, device=device, dtype=dtype)
+
+    # Channels 0-1: delta_mu = 0 (already zero)
+    # Channels 2-3: scale_raw = 0 (softplus(0) + 1 = 1)
+    # Channel 4: rotation = 0 (already zero)
+
+    # Channels 5-7: color_raw = logit(RGB)
+    # logit(x) = log(x / (1-x)) = log(x) - log(1-x)
+    # Clamp to avoid log(0) or log(inf)
+    eps = 1e-6
+    rgb_clamped = image.clamp(eps, 1 - eps)
+    color_raw = torch.log(rgb_clamped) - torch.log(1 - rgb_clamped)
+    identity[:, 5:8] = color_raw
+
+    # Channel 8: opacity_raw = 5 (sigmoid(5) ≈ 0.993)
+    identity[:, 8] = 5.0
+
+    # Channel 9: importance_raw = 5 (sigmoid(5) ≈ 0.993)
+    identity[:, 9] = 5.0
+
+    # Channel 10: depth_raw ≈ 0.54 (softplus(0.54) ≈ 1)
+    # softplus(x) = log(1 + exp(x)), inverse: x = log(exp(y) - 1)
+    # For y=1: x = log(exp(1) - 1) ≈ log(1.718) ≈ 0.54
+    identity[:, 10] = 0.54
+
+    return identity
 
 
 def apply_topk_opacity(

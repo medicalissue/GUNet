@@ -27,7 +27,7 @@ import numpy as np
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.models import MultiScaleGaussianUNet, GaussianSplitNet
+from src.models import MultiScaleGaussianUNet, GaussianSplitNet, make_identity_gaussians, apply_topk_torchsort
 from src.models.gaussian_utils import apply_topk_opacity, apply_topk_importance
 from src.rendering import render_gaussians_2d
 
@@ -92,6 +92,13 @@ def parse_args():
                         help='Pooling type: max, avg, attn, strided')
     parser.add_argument('--pad_type', type=str, default='reflect',
                         help='Padding type: zero, reflect, replicate, circular')
+    parser.add_argument('--output_mode', type=str, default='conv',
+                        choices=['conv', 'cross_attn'],
+                        help='Output mode: conv (per-pixel + top-k) or cross_attn (queries select from candidates)')
+    parser.add_argument('--num_gaussians', type=int, default=1024,
+                        help='Number of output Gaussians (only for cross_attn mode)')
+    parser.add_argument('--use_identity_input', action='store_true',
+                        help='Use 11ch identity Gaussians as input (residual learning)')
     parser.add_argument('--num_levels', type=int, default=5,
                         help='Number of pyramid levels')
     parser.add_argument('--start_level', type=int, default=0,
@@ -130,6 +137,9 @@ def parse_args():
                         help='Number of top-k Gaussians to render')
     parser.add_argument('--topk_temperature', type=float, default=1.0,
                         help='Soft gate sharpness for STE (>1: sharper, <1: softer)')
+    parser.add_argument('--topk_method', type=str, default='ste',
+                        choices=['ste', 'torchsort'],
+                        help='Top-k method: ste (importance^temp) or torchsort (differentiable ranking)')
 
     # Rendering
     parser.add_argument('--camera_model', type=str, default='ortho',
@@ -202,6 +212,12 @@ def parse_args():
     else:
         args.use_amp = False
 
+    # Handle use_identity_input from config
+    if hasattr(args, 'use_identity_input') and args.use_identity_input is not None:
+        args.use_identity_input = bool(args.use_identity_input)
+    else:
+        args.use_identity_input = False
+
     # Print loaded config
     print(f"=== Config ===")
     print(f"data_dir: {args.data_dir}")
@@ -213,8 +229,14 @@ def parse_args():
     print(f"pad_type: {args.pad_type}")
     if args.model_type == 'unet':
         print(f"start_level: {args.start_level}")
+    if args.model_type == 'split':
+        print(f"output_mode: {args.output_mode}")
+        if args.output_mode == 'cross_attn':
+            print(f"num_gaussians: {args.num_gaussians}")
+        print(f"use_identity_input: {args.use_identity_input}")
     print(f"use_topk: {args.use_topk}")
     if args.use_topk:
+        print(f"topk_method: {args.topk_method}")
         print(f"topk_count: {args.topk_count}")
         print(f"topk_temperature: {args.topk_temperature}")
     print(f"use_amp: {args.use_amp}")
@@ -265,6 +287,7 @@ def visualize_reconstruction(
     save_path: str,
     epoch: int,
     batch_idx: int,
+    use_identity_input: bool = False,
 ):
     """
     Visualize reconstruction results.
@@ -281,8 +304,14 @@ def visualize_reconstruction(
     B, C, H, W = images.shape
     device = images.device
 
+    # Prepare model input
+    if use_identity_input:
+        model_input = make_identity_gaussians(images)
+    else:
+        model_input = images
+
     # Forward pass
-    output = model(images)
+    output = model(model_input)
     gaussians = output['gaussians']
     multi_scale = output['multi_scale_gaussians']
 
@@ -432,6 +461,7 @@ def visualize_gaussians_detail(
     model: nn.Module,
     images: torch.Tensor,
     save_path: str,
+    use_identity_input: bool = False,
 ):
     """
     Detailed visualization of Gaussian parameters.
@@ -441,7 +471,13 @@ def visualize_gaussians_detail(
 
     B, C, H, W = images.shape
 
-    output = model(images)
+    # Prepare model input
+    if use_identity_input:
+        model_input = make_identity_gaussians(images)
+    else:
+        model_input = images
+
+    output = model(model_input)
     gaussians = output['gaussians']
     gaussians = cast_gaussians_to_float32(gaussians)
 
@@ -484,41 +520,70 @@ def visualize_gaussians_detail(
     axes[0, 2].set_title('Difference')
     axes[0, 2].axis('off')
 
-    # Row 1: Importance map, Scale map, Opacity map (as spatial heatmaps)
-    # Importance map (reshape to HxW)
-    if has_importance:
+    # Row 1: Importance map, Scale map, Opacity map
+    # Check if we can reshape to spatial map (conv mode: N == H*W)
+    N = len(means)
+    is_spatial = (N == H * W)
+
+    # Importance map
+    if has_importance and is_spatial:
         importance_map = importance.reshape(H, W)
         im = axes[1, 0].imshow(importance_map, cmap='hot', vmin=0, vmax=1)
         axes[1, 0].set_title(f'Importance Map\nmean={importance.mean():.3f}, max={importance.max():.3f}')
         axes[1, 0].axis('off')
         plt.colorbar(im, ax=axes[1, 0], fraction=0.046)
     else:
-        axes[1, 0].text(0.5, 0.5, 'No importance\n(not GaussianSplitNet)',
-                       ha='center', va='center', transform=axes[1, 0].transAxes)
-        axes[1, 0].set_title('Importance Map')
+        axes[1, 0].text(0.5, 0.5, f'Cross-attn mode\n{N} Gaussians',
+                       ha='center', va='center', transform=axes[1, 0].transAxes, fontsize=12)
+        axes[1, 0].set_title('No spatial map')
         axes[1, 0].axis('off')
 
-    # Scale map (mean of scale_x and scale_y, reshape to HxW)
+    # Scale map
     mean_scales = scales.mean(axis=1)
-    scale_map = mean_scales.reshape(H, W)
-    im = axes[1, 1].imshow(scale_map, cmap='viridis')
-    axes[1, 1].set_title(f'Scale Map (mean)\nmean={mean_scales.mean():.2f}, max={mean_scales.max():.2f}')
-    axes[1, 1].axis('off')
-    plt.colorbar(im, ax=axes[1, 1], fraction=0.046)
+    if is_spatial:
+        scale_map = mean_scales.reshape(H, W)
+        im = axes[1, 1].imshow(scale_map, cmap='viridis')
+        axes[1, 1].set_title(f'Scale Map (mean)\nmean={mean_scales.mean():.2f}, max={mean_scales.max():.2f}')
+        axes[1, 1].axis('off')
+        plt.colorbar(im, ax=axes[1, 1], fraction=0.046)
+    else:
+        # Scatter plot of positions colored by scale
+        sc = axes[1, 1].scatter(means[:, 0], means[:, 1], c=mean_scales, s=3, cmap='viridis', alpha=0.7)
+        axes[1, 1].set_xlim(0, W)
+        axes[1, 1].set_ylim(H, 0)
+        axes[1, 1].set_title(f'Scale Scatter\nmean={mean_scales.mean():.2f}')
+        axes[1, 1].set_aspect('equal')
+        plt.colorbar(sc, ax=axes[1, 1], fraction=0.046)
 
     # Depth map (if available) or Opacity map
-    if has_depth:
+    if has_depth and is_spatial:
         depth_map = depths.reshape(H, W)
         im = axes[1, 2].imshow(depth_map, cmap='plasma')
         axes[1, 2].set_title(f'Depth Map\nmean={depths.mean():.2f}, range=[{depths.min():.2f}, {depths.max():.2f}]')
         axes[1, 2].axis('off')
         plt.colorbar(im, ax=axes[1, 2], fraction=0.046)
-    else:
+    elif has_depth:
+        # Scatter plot colored by depth
+        sc = axes[1, 2].scatter(means[:, 0], means[:, 1], c=depths, s=3, cmap='plasma', alpha=0.7)
+        axes[1, 2].set_xlim(0, W)
+        axes[1, 2].set_ylim(H, 0)
+        axes[1, 2].set_title(f'Depth Scatter\nmean={depths.mean():.2f}')
+        axes[1, 2].set_aspect('equal')
+        plt.colorbar(sc, ax=axes[1, 2], fraction=0.046)
+    elif is_spatial:
         opacity_map = opacities.reshape(H, W)
         im = axes[1, 2].imshow(opacity_map, cmap='gray', vmin=0, vmax=1)
         axes[1, 2].set_title(f'Opacity Map\nmean={opacities.mean():.3f}')
         axes[1, 2].axis('off')
         plt.colorbar(im, ax=axes[1, 2], fraction=0.046)
+    else:
+        # Scatter plot colored by opacity
+        sc = axes[1, 2].scatter(means[:, 0], means[:, 1], c=opacities, s=3, cmap='gray', alpha=0.7, vmin=0, vmax=1)
+        axes[1, 2].set_xlim(0, W)
+        axes[1, 2].set_ylim(H, 0)
+        axes[1, 2].set_title(f'Opacity Scatter\nmean={opacities.mean():.3f}')
+        axes[1, 2].set_aspect('equal')
+        plt.colorbar(sc, ax=axes[1, 2], fraction=0.046)
 
     # Row 2: Histograms - Scale distribution, Opacity distribution, Importance distribution
     # Scale histogram (2D: scale_x vs scale_y)
@@ -658,9 +723,11 @@ def train_one_epoch(
     use_topk: bool = False,
     topk_count: int = 1024,
     topk_temperature: float = 1.0,
+    topk_method: str = "ste",
     use_amp: bool = False,
     scaler: GradScaler = None,
     camera_model: str = "ortho",
+    use_identity_input: bool = False,
 ) -> dict:
     """Train for one epoch with visualization."""
     model.train()
@@ -680,19 +747,29 @@ def train_one_epoch(
         images = batch['image'].to(device)
         B, C, H, W = images.shape
 
+        # Prepare model input
+        if use_identity_input:
+            # Convert RGB to 11ch identity Gaussians
+            model_input = make_identity_gaussians(images)
+        else:
+            model_input = images
+
         # Forward pass
         optimizer.zero_grad()
 
         # Use autocast for mixed precision (only for model forward)
         with autocast('cuda', enabled=use_amp):
-            output = model(images)
+            output = model(model_input)
             gaussians = output['gaussians']
 
             # Apply top-k selection if enabled
             if use_topk:
                 # Use importance-based selection if available (GaussianSplitNet)
                 if 'importance' in gaussians:
-                    gaussians = apply_topk_importance(gaussians, topk_count, topk_temperature)
+                    if topk_method == 'torchsort':
+                        gaussians = apply_topk_torchsort(gaussians, topk_count, topk_temperature)
+                    else:  # 'ste'
+                        gaussians = apply_topk_importance(gaussians, topk_count, topk_temperature)
                 else:
                     gaussians = apply_topk_opacity(gaussians, topk_count)
 
@@ -745,12 +822,12 @@ def train_one_epoch(
         # Visualization
         if batch_idx % vis_every == 0:
             vis_path = vis_dir / f'epoch{epoch:04d}_batch{batch_idx:06d}.png'
-            visualize_reconstruction(model, images, str(vis_path), epoch, batch_idx)
+            visualize_reconstruction(model, images, str(vis_path), epoch, batch_idx, use_identity_input)
 
             # Detailed visualization every 10x vis_every
             if batch_idx % (vis_every) == 0:
                 detail_path = vis_dir / f'detail_epoch{epoch:04d}_batch{batch_idx:06d}.png'
-                visualize_gaussians_detail(model, images, str(detail_path))
+                visualize_gaussians_detail(model, images, str(detail_path), use_identity_input)
 
     return {
         'loss': total_loss / num_batches,
@@ -899,6 +976,9 @@ def main():
             num_levels=args.num_levels,
             pool_type=args.pool_type,
             pad_type=args.pad_type,
+            output_mode=args.output_mode,
+            num_gaussians=args.num_gaussians,
+            use_identity_input=args.use_identity_input,
         ).to(device)
     else:  # 'unet'
         model = MultiScaleGaussianUNet(
@@ -966,8 +1046,10 @@ def main():
             vis_dir=vis_dir, vis_every=args.vis_every,
             use_topk=args.use_topk, topk_count=args.topk_count,
             topk_temperature=args.topk_temperature,
+            topk_method=args.topk_method,
             use_amp=args.use_amp, scaler=scaler,
             camera_model=args.camera_model,
+            use_identity_input=args.use_identity_input,
         )
 
         # Update scheduler

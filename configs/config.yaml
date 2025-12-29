@@ -7,11 +7,14 @@ image_size: 256
 # Model
 model_type: split    # 'unet' (UNet decoder) or 'split' (Gaussian split decoder)
 base_channels: 64
-num_levels: 4        # Total encoder/decoder levels
+num_levels: 6        # Total encoder/decoder levels
 start_level: 0       # Start Gaussian output from this level (only for unet)
                      # start_level=1 means: 128x128, 64x64, 32x32, 16x16 (skip 256x256)
-pool_type: strided       # Pooling type: 'max', 'avg', 'attn' (attention), 'strided' (strided conv)
-pad_type: zero     # Padding type: 'zero', 'reflect', 'replicate', 'circular'
+pool_type: avg       # Pooling type: 'max', 'avg', 'attn' (attention), 'strided' (strided conv)
+pad_type: reflect     # Padding type: 'zero', 'reflect', 'replicate', 'circular'
+output_mode: conv  # 'conv' (per-pixel + top-k) or 'cross_attn' (k queries select from HxW)
+num_gaussians: 1024  # Number of output Gaussians (only for cross_attn mode)
+use_identity_input: true  # Use 11ch identity Gaussians as input (residual learning)
 
 # Training
 batch_size: 64
@@ -29,9 +32,10 @@ scale_weight: 0.0        # Weight for scale loss - penalizes small scales (0 to 
 sparsity_weight: 0.0     # Weight for sparsity loss - encourages binary opacity (0 to disable)
 
 # Top-k selection
-use_topk: true           # Use top-k importance selection (STE: forward=hard, backward=soft)
-topk_count: 5096         # Number of Gaussians to render (top-k by importance)
-topk_temperature: 1.0    # Soft gate sharpness (>1: sharper, <1: softer)
+use_topk: true           # Use top-k importance selection
+topk_method: torchsort   # 'ste' (importance^temp) or 'torchsort' (differentiable ranking)
+topk_count: 1024         # Number of Gaussians to render (top-k by importance)
+topk_temperature: 1.0    # For torchsort: regularization_strength (lower=harder). For STE: importance^temp
 
 # Rendering
 camera_model: ortho      # 'pinhole' (perspective, depth affects size) or 'ortho' (orthographic, depth only for ordering)
